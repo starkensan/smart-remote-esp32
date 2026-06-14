@@ -5,8 +5,8 @@
 #include <IRsend.h>
 #include <IRutils.h>
 #include <LittleFS.h>
-#include <WebServer.h>
 #include <WiFi.h>
+#include <HomeSpan.h>
 
 #include "config.h"
 #include "IrCommandStore.h"
@@ -15,16 +15,23 @@ namespace {
 
 constexpr size_t kCaptureBufferSize = 1024;
 constexpr uint8_t kIrTimeoutMs = 50;
+constexpr uint32_t kLearningTimeoutMs = 15000;
+constexpr uint32_t kButtonDebounceMs = 30;
+constexpr uint32_t kShortPressMaxMs = 1000;
+constexpr uint32_t kIrClearPressMs = 7000;
 
 IRsend irsend(IR_SEND_PIN);
 IRrecv irrecv(IR_RECV_PIN, kCaptureBufferSize, kIrTimeoutMs, true);
 decode_results results;
-WebServer server(HTTP_PORT);
 ir_store::IrCommandStore irCommandStore;
 
-String lastDecodedJson = "{}";
 uint32_t lastBlinkAt = 0;
 bool ledState = false;
+const char *learningCommandId = nullptr;
+uint32_t learningStartedAt = 0;
+bool buttonWasPressed = false;
+uint32_t buttonPressedAt = 0;
+bool buttonLongHandled = false;
 
 void blinkStatus(uint32_t intervalMs) {
   if (STATUS_LED_PIN < 0) {
@@ -41,150 +48,215 @@ void blinkStatus(uint32_t intervalMs) {
   digitalWrite(STATUS_LED_PIN, ledState ? HIGH : LOW);
 }
 
-bool connectWiFi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.setHostname(DEVICE_NAME);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+void printHelp() {
+  Serial.println("IR learning commands in HomeSpan CLI:");
+  Serial.println("  o - learn light_on");
+  Serial.println("  n - learn night_light");
+  Serial.println("  q - show IR command status");
+  Serial.println("  k - cancel active learning");
+}
 
-  Serial.printf("Connecting to Wi-Fi SSID: %s\n", WIFI_SSID);
-  for (uint8_t i = 0; i < 60; i++) {
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.printf("Connected. IP address: %s\n", WiFi.localIP().toString().c_str());
-      return true;
-    }
-    blinkStatus(250);
-    delay(250);
+void startLearning(const char *commandId) {
+  if (!irCommandStore.isValidCommandId(commandId)) {
+    Serial.println("Unknown IR command id.");
+    return;
   }
 
-  Serial.println("Wi-Fi connection failed.");
-  return false;
+  learningCommandId = commandId;
+  learningStartedAt = millis();
+  Serial.printf("Learning %s. Press the matching remote button within %lu seconds.\n",
+                learningCommandId, kLearningTimeoutMs / 1000);
 }
 
-String contentTypeFor(const String &path) {
-  if (path.endsWith(".html")) return "text/html";
-  if (path.endsWith(".css")) return "text/css";
-  if (path.endsWith(".js")) return "application/javascript";
-  if (path.endsWith(".json")) return "application/json";
-  return "text/plain";
+void cancelLearning() {
+  if (learningCommandId == nullptr) {
+    Serial.println("No active learning session.");
+    return;
+  }
+
+  Serial.printf("Canceled learning %s.\n", learningCommandId);
+  learningCommandId = nullptr;
 }
 
-bool serveFile(const String &path) {
-  String filePath = path == "/" ? "/index.html" : path;
-  if (!LittleFS.exists(filePath)) {
+void startNextButtonLearning() {
+  if (!irCommandStore.hasCommand(ir_store::kLightOnCommand)) {
+    startLearning(ir_store::kLightOnCommand);
+    return;
+  }
+
+  if (!irCommandStore.hasCommand(ir_store::kNightLightCommand)) {
+    startLearning(ir_store::kNightLightCommand);
+    return;
+  }
+
+  static bool learnLightOnNext = true;
+  startLearning(learnLightOnNext ? ir_store::kLightOnCommand
+                                 : ir_store::kNightLightCommand);
+  learnLightOnNext = !learnLightOnNext;
+}
+
+void commandLearnLightOn(const char *) {
+  startLearning(ir_store::kLightOnCommand);
+}
+
+void commandLearnNightLight(const char *) {
+  startLearning(ir_store::kNightLightCommand);
+}
+
+void commandPrintIrStatus(const char *) {
+  irCommandStore.printStatus(Serial);
+}
+
+void commandCancelLearning(const char *) {
+  cancelLearning();
+}
+
+void clearLearnedIrCommands() {
+  if (learningCommandId != nullptr) {
+    learningCommandId = nullptr;
+    Serial.println("Canceled active learning before clearing stored IR commands.");
+  }
+
+  if (irCommandStore.clear() && irCommandStore.begin()) {
+    Serial.println("Cleared learned IR commands.");
+  } else {
+    Serial.println("Failed to clear learned IR commands.");
+  }
+  irCommandStore.printStatus(Serial);
+}
+
+void commandClearLearnedIr(const char *) {
+  clearLearnedIrCommands();
+}
+
+bool sendStoredRawCommand(const char *commandId) {
+  ir_store::LearnedIrCommand command;
+  if (!irCommandStore.loadCommand(commandId, command)) {
+    Serial.printf("IR command %s is not learned yet.\n", commandId);
     return false;
   }
 
-  File file = LittleFS.open(filePath, "r");
-  server.streamFile(file, contentTypeFor(filePath));
-  file.close();
+  Serial.printf("Sending %s with %u RAW timings at %u kHz.\n", commandId,
+                command.rawLength, command.frequencyKhz);
+  irsend.sendRaw(command.raw, command.rawLength, command.frequencyKhz);
   return true;
 }
 
-void sendJson(int status, const JsonDocument &doc) {
-  String body;
-  serializeJson(doc, body);
-  server.send(status, "application/json", body);
-}
+struct SmartRemoteLight : Service::LightBulb {
+  SpanCharacteristic *power;
 
-void handleStatus() {
-  JsonDocument doc;
-  doc["device"] = DEVICE_NAME;
-  doc["ip"] = WiFi.localIP().toString();
-  doc["rssi"] = WiFi.RSSI();
-  doc["irSendPin"] = IR_SEND_PIN;
-  doc["irRecvPin"] = IR_RECV_PIN;
-  doc["lastDecoded"] = serialized(lastDecodedJson);
-  sendJson(200, doc);
-}
+  SmartRemoteLight() : Service::LightBulb() {
+    power = new Characteristic::On();
+  }
 
-void handleSend() {
-  JsonDocument req;
-  const DeserializationError error = deserializeJson(req, server.arg("plain"));
-  if (error) {
-    JsonDocument doc;
-    doc["error"] = "invalid_json";
-    sendJson(400, doc);
+  boolean update() override {
+    const bool requestedOn = power->getNewVal();
+    return sendStoredRawCommand(requestedOn ? ir_store::kLightOnCommand
+                                           : ir_store::kNightLightCommand);
+  }
+};
+
+void handleConfigButton() {
+  const bool pressed = digitalRead(CONFIG_BUTTON_PIN) == LOW;
+  const uint32_t now = millis();
+
+  if (pressed && !buttonWasPressed) {
+    buttonWasPressed = true;
+    buttonPressedAt = now;
+    buttonLongHandled = false;
     return;
   }
 
-  const char *protocol = req["protocol"] | "NEC";
-  const uint64_t value = strtoull((req["value"] | "0"), nullptr, 0);
-  const uint16_t bits = req["bits"] | 32;
-  const uint16_t repeat = req["repeat"] | 0;
+  if (pressed && buttonWasPressed && !buttonLongHandled &&
+      now - buttonPressedAt >= kIrClearPressMs) {
+    buttonLongHandled = true;
+    clearLearnedIrCommands();
+    return;
+  }
 
-  if (strcasecmp(protocol, "NEC") == 0) {
-    irsend.sendNEC(value, bits, repeat);
-  } else if (strcasecmp(protocol, "SONY") == 0) {
-    irsend.sendSony(value, bits, repeat);
-  } else if (strcasecmp(protocol, "PANASONIC") == 0) {
-    const uint16_t address = req["address"] | 0x4004;
-    irsend.sendPanasonic(address, value);
-  } else if (strcasecmp(protocol, "RAW") == 0) {
-    JsonArray raw = req["raw"].as<JsonArray>();
-    if (raw.isNull() || raw.size() == 0 || raw.size() > 512) {
-      JsonDocument doc;
-      doc["error"] = "raw_array_required";
-      sendJson(400, doc);
-      return;
+  if (!pressed && buttonWasPressed) {
+    buttonWasPressed = false;
+    const uint32_t pressMs = now - buttonPressedAt;
+    if (!buttonLongHandled && pressMs >= kButtonDebounceMs &&
+        pressMs <= kShortPressMaxMs) {
+      if (learningCommandId == nullptr) {
+        startNextButtonLearning();
+      } else {
+        cancelLearning();
+      }
     }
-
-    uint16_t timings[512];
-    size_t count = 0;
-    for (JsonVariant item : raw) {
-      timings[count++] = item.as<uint16_t>();
-    }
-    const uint16_t frequency = req["frequency"] | 38;
-    irsend.sendRaw(timings, count, frequency);
-  } else {
-    JsonDocument doc;
-    doc["error"] = "unsupported_protocol";
-    sendJson(400, doc);
-    return;
+    buttonLongHandled = false;
   }
-
-  JsonDocument doc;
-  doc["ok"] = true;
-  doc["protocol"] = protocol;
-  sendJson(200, doc);
-}
-
-void handleNotFound() {
-  if (serveFile(server.uri())) {
-    return;
-  }
-
-  JsonDocument doc;
-  doc["error"] = "not_found";
-  doc["path"] = server.uri();
-  sendJson(404, doc);
 }
 
 void updateLastDecoded() {
   if (!irrecv.decode(&results)) {
+    if (learningCommandId != nullptr &&
+        millis() - learningStartedAt > kLearningTimeoutMs) {
+      Serial.printf("Learning %s timed out. Existing command was not changed.\n",
+                    learningCommandId);
+      learningCommandId = nullptr;
+    }
     return;
   }
 
-  JsonDocument doc;
-  doc["protocol"] = typeToString(results.decode_type);
-  doc["value"] = uint64ToString(results.value, 16);
-  doc["bits"] = results.bits;
-  doc["rawLength"] = results.rawlen;
-  doc["timestampMs"] = millis();
+  if (learningCommandId != nullptr) {
+    const uint16_t rawLength = getCorrectedRawLength(&results);
+    if (rawLength == 0 || rawLength > ir_store::kMaxRawTimings) {
+      Serial.printf("Rejected %s capture. RAW length %u exceeds limit %u.\n",
+                    learningCommandId, rawLength, ir_store::kMaxRawTimings);
+    } else {
+      uint16_t *raw = resultToRawArray(&results);
+      if (raw != nullptr &&
+          irCommandStore.saveCommand(learningCommandId, raw, rawLength)) {
+        Serial.printf("Stored %s with %u RAW timings.\n", learningCommandId,
+                      rawLength);
+        irCommandStore.printStatus(Serial);
+      } else {
+        Serial.printf("Failed to store %s. Existing command was not changed.\n",
+                      learningCommandId);
+      }
+      delete[] raw;
+    }
 
-  String json;
-  serializeJson(doc, json);
-  lastDecodedJson = json;
-  Serial.println(json);
+    learningCommandId = nullptr;
+    irrecv.resume();
+    return;
+  }
+
+  Serial.printf("Received IR: protocol=%s value=%s bits=%u rawLength=%u\n",
+                typeToString(results.decode_type).c_str(),
+                uint64ToString(results.value, 16).c_str(), results.bits,
+                results.rawlen);
   irrecv.resume();
 }
 
-void setupRoutes() {
-  server.on("/", HTTP_GET, []() { serveFile("/index.html"); });
-  server.on("/api/status", HTTP_GET, handleStatus);
-  server.on("/api/send", HTTP_POST, handleSend);
-  server.onNotFound(handleNotFound);
-  server.begin();
-  Serial.printf("HTTP server started on port %d\n", HTTP_PORT);
+void setupHomeSpan() {
+  homeSpan.setLogLevel(1);
+  homeSpan.setControlPin(CONFIG_BUTTON_PIN);
+  homeSpan.setApSSID(SETUP_AP_SSID);
+  homeSpan.setApPassword(SETUP_AP_PASSWORD);
+  homeSpan.setApTimeout(300);
+  homeSpan.begin(Category::Lighting, DEVICE_NAME);
+
+  new SpanAccessory();
+    new Service::AccessoryInformation();
+      new Characteristic::Identify();
+      new Characteristic::Name("Smart Remote Light");
+      new Characteristic::Manufacturer("starkensan");
+      new Characteristic::Model("XIAO ESP32S3 IR Remote");
+      new Characteristic::FirmwareRevision("0.1.0");
+    new SmartRemoteLight();
+
+  new SpanUserCommand('o', " - learn light_on IR command", commandLearnLightOn);
+  new SpanUserCommand('n', " - learn night_light IR command",
+                      commandLearnNightLight);
+  new SpanUserCommand('q', " - show learned IR command status",
+                      commandPrintIrStatus);
+  new SpanUserCommand('k', " - cancel active IR learning",
+                      commandCancelLearning);
+  new SpanUserCommand('y', " - clear learned IR commands",
+                      commandClearLearnedIr);
 }
 
 }  // namespace
@@ -195,6 +267,7 @@ void setup() {
     pinMode(STATUS_LED_PIN, OUTPUT);
     digitalWrite(STATUS_LED_PIN, LOW);
   }
+  pinMode(CONFIG_BUTTON_PIN, INPUT_PULLUP);
 
   if (!LittleFS.begin(true)) {
     Serial.println("LittleFS mount failed.");
@@ -207,12 +280,13 @@ void setup() {
   irsend.begin();
   irrecv.enableIRIn();
 
-  connectWiFi();
-  setupRoutes();
+  setupHomeSpan();
+  printHelp();
 }
 
 void loop() {
-  server.handleClient();
+  homeSpan.poll();
+  handleConfigButton();
   updateLastDecoded();
   blinkStatus(WiFi.status() == WL_CONNECTED ? 1000 : 150);
 }
