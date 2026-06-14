@@ -2,6 +2,8 @@
 
 ESP32で作るスマートリモコンのPlatformIOプロジェクトです。赤外線LEDで家電に信号を送信し、赤外線受信モジュールでリモコン信号を学習できます。
 
+現在のv1要件は [docs/requirements.md](docs/requirements.md) にまとめています。
+
 ## 機能
 
 - ESP32 DevKit向けArduino firmware
