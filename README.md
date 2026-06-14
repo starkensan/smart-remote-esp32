@@ -7,10 +7,10 @@ Seeed Studio XIAO ESP32S3で作るスマートリモコンのPlatformIOプロジ
 ## 機能
 
 - Seeed Studio XIAO ESP32S3向けArduino firmware
-- IR送信: NEC、SONY、PANASONIC、RAW
-- IR受信: 最後に受信した信号をWeb APIで確認
-- LittleFS配信の簡易Web UI
-- JSON APIによる外部連携
+- HomeSpanによるWi-Fi設定とHomeKit連携
+- IR送信: 学習済みRAW信号
+- IR受信: 既存リモコンの「点灯」「常夜灯」信号を学習
+- v1では独自Web UIなし
 
 ## 想定部品
 
@@ -34,54 +34,46 @@ Seeed Studio XIAO ESP32S3で作るスマートリモコンのPlatformIOプロジ
 ## セットアップ
 
 1. PlatformIOをインストールします。
-2. `include/secrets.example.h` を `include/secrets.h` にコピーし、`WIFI_SSID` と `WIFI_PASSWORD` を書き換えます。
-3. ファームウェアをビルドします。
+2. ファームウェアをビルドします。
 
 ```sh
 pio run
 ```
 
-4. Web UIをLittleFSへ書き込みます。
-
-```sh
-pio run --target uploadfs
-```
-
-5. ESP32へ書き込みます。
+3. ESP32へ書き込みます。
 
 ```sh
 pio run --target upload
 ```
 
-6. シリアルモニタでIPアドレスを確認します。
+4. シリアルモニタを開きます。
 
 ```sh
 pio device monitor
 ```
 
-## API
+5. HomeSpan CLIまたは起動する設定APでWi-Fiを設定します。
 
-### 状態確認
+初期AP:
 
-```sh
-curl http://<esp32-ip>/api/status
-```
+- SSID: `SmartRemote-Setup`
+- Password: `homespan`
 
-### NEC信号送信
+## HomeSpan CLI
 
-```sh
-curl -X POST http://<esp32-ip>/api/send \
-  -H 'Content-Type: application/json' \
-  -d '{"protocol":"NEC","value":"0x20DF10EF","bits":32}'
-```
+シリアルモニタからHomeSpan CLIを使えます。`?` を入力するとHomeSpanのコマンド一覧が表示されます。
 
-### RAW信号送信
+このプロジェクト固有のIR学習コマンド:
 
-```sh
-curl -X POST http://<esp32-ip>/api/send \
-  -H 'Content-Type: application/json' \
-  -d '{"protocol":"RAW","frequency":38,"raw":[9000,4500,560,560]}'
-```
+- `o`: 「点灯」信号を学習
+- `n`: 「常夜灯」信号を学習
+- `q`: 学習済み信号の保存状態を表示
+- `k`: 学習中の操作をキャンセル
+
+## ボタン操作
+
+- D3短押し: 未学習のIR信号を順に学習
+- D3長押し: HomeSpanのコントロールボタンとして動作
 
 ## 配線メモ
 
