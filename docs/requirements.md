@@ -1,157 +1,157 @@
-# Requirements
+# 要件
 
-## Goal
+## 目的
 
 Seeed Studio XIAO ESP32S3で、HomeKitから操作できる照明用スマートリモコンを作る。
 
-まずは1部屋の照明を確実にON/OFF相当で操作できることを優先する。v1はHomeSpanのみでWeb UIを作らない。Web UIはv2要件として後から追加する。
+まずは1部屋の照明を確実にON/OFF相当で操作できることを優先する。v1はHomeSpanのみで実装し、Web UIは作らない。Web UIはv2要件として後から追加する。
 
 エアコン対応はv1/v2では対象外とし、照明が動いてから追加検討する。
 
-## Target Hardware
+## 対象ハードウェア
 
-- Board: Seeed Studio XIAO ESP32S3, standard edition
-- IR transmitter: external transistor/MOSFET driver controlled by ESP32 GPIO
-- IR LEDs: multiple LEDs may be connected on the hardware side
-- IR LED power: USB 5V
-- ESP32 GPIO only controls the transistor/MOSFET gate/base
-- IR receiver: 38kHz demodulating receiver module such as VS1838B or TSOP-series
+- ボード: Seeed Studio XIAO ESP32S3 通常版
+- 赤外線送信: ESP32のGPIOで外付けトランジスタまたはMOSFETを制御する
+- 赤外線LED: ハードウェア側で複数接続してよい
+- 赤外線LED電源: USB 5V
+- ESP32のGPIOはトランジスタ/MOSFETのゲートまたはベース制御のみに使う
+- 赤外線受信: VS1838BまたはTSOP系などの38kHz復調済み受信モジュール
 
-## Initial Pin Assignment
+## 初期ピン割り当て
 
-| Purpose | Pin |
+| 用途 | ピン |
 | --- | --- |
-| IR transmit control | D1 |
-| IR receive input | D2 |
-| Config/reset button | D3 |
-| Status LED | Not required for v1 |
+| 赤外線送信制御 | D1 |
+| 赤外線受信入力 | D2 |
+| 設定/リセットボタン | D3 |
+| ステータスLED | v1では不要 |
 
-These pins may be changed in `include/config.h`.
+ピンは `include/config.h` で変更できるようにする。
 
-## User-Facing Behavior
+## ユーザー向けの動作
 
 ### HomeKit
 
-- Use HomeSpan for HomeKit integration.
-- Expose the device as one HomeKit `Lightbulb` accessory.
-- Support ON/OFF only for v1.
-- HomeKit ON sends the learned "点灯" IR signal.
-- HomeKit OFF sends the learned "常夜灯" IR signal.
+- HomeKit連携にはHomeSpanを使う。
+- HomeKit上では1つの `Lightbulb` アクセサリとして公開する。
+- v1ではON/OFFのみ対応する。
+- HomeKitのON操作で、学習済みの「点灯」赤外線信号を送信する。
+- HomeKitのOFF操作で、学習済みの「常夜灯」赤外線信号を送信する。
 
-The physical light may not map to true power-off. In v1, HomeKit OFF intentionally means "常夜灯".
+実際の照明の状態は完全な電源OFFとは一致しない可能性がある。v1ではHomeKit上のOFFを意図的に「常夜灯」として扱う。
 
-### Setup And Maintenance
+### セットアップとメンテナンス
 
-Do not build a custom Web UI for v1. Web UI belongs to v2.
+v1では独自のWeb UIを作らない。Web UIはv2の対象とする。
 
-Use HomeSpan-provided provisioning/setup behavior where possible, plus the physical config/reset button and serial monitor output for device-specific maintenance.
+Wi-FiやHomeKitの設定は、可能な限りHomeSpanが提供するプロビジョニング/セットアップ機能を使う。デバイス固有のメンテナンスは、物理ボタンとシリアルモニタ出力を使って行う。
 
-Required v1 actions:
+v1で必要な操作:
 
-- Wi-Fi setup through HomeSpan-supported setup/provisioning flow
-- Learn "点灯" IR signal
-- Learn "常夜灯" IR signal
-- Report whether both required signals are stored through serial logs
-- Test-send learned signals through HomeKit ON/OFF after setup
-- Reset Wi-Fi/HomeKit/learned IR data through button/serial-supported flows
+- HomeSpan対応のセットアップ/プロビジョニング手順でWi-Fiを設定する
+- 「点灯」赤外線信号を学習する
+- 「常夜灯」赤外線信号を学習する
+- 2つの必須信号が保存済みかどうかをシリアルログで確認できる
+- セットアップ後、HomeKitのON/OFF操作で学習済み信号をテスト送信できる
+- ボタンまたはシリアル/HomeSpan対応の手順でWi-Fi/HomeKit/学習済み赤外線データをリセットできる
 
-## IR Learning
+## 赤外線学習
 
-- The device must learn IR signals from an existing remote.
-- The required learned commands are:
-  - `light_on`: original remote's "点灯" button
-  - `night_light`: original remote's "常夜灯" button
-- Learned data must be stored on the ESP32.
-- Learned data must survive reboot and power loss.
-- RAW timing storage is acceptable for v1 because it is faster to support unknown lighting remotes.
+- 既存リモコンから赤外線信号を学習できるようにする。
+- 必須の学習コマンドは以下とする。
+  - `light_on`: 既存リモコンの「点灯」ボタン
+  - `night_light`: 既存リモコンの「常夜灯」ボタン
+- 学習データはESP32本体に保存する。
+- 学習データは再起動や電源断後も保持する。
+- v1では未知の照明リモコンに早く対応するため、RAWタイミング保存を許容する。
 
-## Storage
+## 保存
 
-- Store device settings and learned IR data on ESP32 flash.
-- Do not commit local Wi-Fi credentials, pairing-specific values, or generated local config.
-- Prefer JSON files on LittleFS unless HomeSpan imposes a better storage path for its own pairing data.
+- デバイス設定と学習済み赤外線データはESP32のフラッシュに保存する。
+- ローカルWi-Fi認証情報、ペアリング固有値、生成されたローカル設定はコミットしない。
+- HomeSpan側でより適切な保存方法が必要な場合を除き、独自データはLittleFS上のJSONファイルを優先する。
 
-## Wi-Fi Provisioning
+## Wi-Fiプロビジョニング
 
-- Use HomeSpan-supported Wi-Fi provisioning/setup behavior.
-- Hard-coded Wi-Fi credentials are not acceptable for the intended public version.
-- If Wi-Fi configuration is missing or connection fails repeatedly, the device should enter setup mode.
+- HomeSpan対応のWi-Fiプロビジョニング/セットアップ機能を使う。
+- 公開予定のリポジトリとして、Wi-Fi認証情報のハードコードは不可とする。
+- Wi-Fi設定がない場合、または接続に繰り返し失敗する場合は、セットアップモードへ入る。
 
-## Reset
+## リセット
 
-Support both reset paths:
+以下のリセット経路をサポートする。
 
-- External button on D3
-- Serial/HomeSpan-supported reset command where practical
+- D3の外付けボタン
+- 実装上可能であれば、シリアルまたはHomeSpan対応のリセットコマンド
 
-Button behavior for v1:
+v1のボタン動作:
 
-- Short press: no required behavior
-- Long press: enter setup/reset state
+- 短押し: 必須動作なし
+- 長押し: セットアップ/リセット状態へ入る
 
-Exact long-press duration can be decided during implementation.
+長押し時間の具体値は実装時に決める。
 
-## Public Repository Constraints
+## 公開リポジトリとしての制約
 
-The repository is intended to become public after the first usable version works.
+このリポジトリは、最初に使える版が動いた後に公開予定とする。
 
-Do not commit:
+以下はコミットしない。
 
-- Wi-Fi SSID/password
-- HomeKit pairing secrets
-- Generated local storage files
-- Board-specific private notes that include household information
+- Wi-Fi SSID/パスワード
+- HomeKitペアリング秘密情報
+- 生成されたローカル保存ファイル
+- 家庭環境が分かるボード固有の個人メモ
 
-## v1 Scope
+## v1スコープ
 
-Included:
+含めるもの:
 
-- XIAO ESP32S3 PlatformIO configuration
-- HomeSpan-based HomeKit Lightbulb accessory
-- HomeSpan-supported Wi-Fi provisioning/setup
-- Button/serial-driven IR learning and maintenance
-- Persistent storage of two learned IR commands
-- IR send through external transistor driver
-- README setup instructions
+- XIAO ESP32S3向けPlatformIO設定
+- HomeSpanベースのHomeKit Lightbulbアクセサリ
+- HomeSpan対応のWi-Fiプロビジョニング/セットアップ
+- ボタン/シリアル駆動の赤外線学習とメンテナンス
+- 2つの学習済み赤外線コマンドの永続保存
+- 外付けトランジスタドライバ経由の赤外線送信
+- READMEのセットアップ手順
 
-Excluded from v1:
+含めないもの:
 
-- Air conditioner support
-- Brightness control
-- Color temperature control
-- Multiple HomeKit accessories
-- Custom Web UI
+- エアコン対応
+- 明るさ制御
+- 色温度制御
+- 複数のHomeKitアクセサリ
+- 独自Web UI
 - MQTT
 - Alexa / Google Home
-- Home Assistant-specific integration
-- Multi-room support
+- Home Assistant固有連携
+- 複数部屋対応
 
-## v1 Implementation Priority
+## v1実装優先順
 
-1. Build and flash successfully on XIAO ESP32S3.
-2. Learn and save two IR commands.
-3. Expose HomeKit Lightbulb via HomeSpan.
-4. Map HomeKit ON/OFF to the saved IR commands.
-5. Add reset/setup handling.
+1. XIAO ESP32S3でビルドと書き込みができるようにする。
+2. 2つの赤外線コマンドを学習して保存できるようにする。
+3. HomeSpanでHomeKit Lightbulbを公開する。
+4. HomeKitのON/OFF操作を保存済み赤外線コマンドに対応付ける。
+5. リセット/セットアップ処理を追加する。
 
-## v2 Scope
+## v2スコープ
 
-v2 adds a custom Web UI for users who want browser-based setup and maintenance in addition to HomeKit.
+v2では、HomeKitに加えてブラウザからセットアップとメンテナンスを行いたいユーザー向けに独自Web UIを追加する。
 
-Included:
+含めるもの:
 
-- Web UI for IR learning and maintenance
-- Browser-visible stored/missing state for `light_on` and `night_light`
-- Test-send controls for learned signals
-- Reset controls for learned IR data and supported setup state
+- 赤外線学習とメンテナンス用Web UI
+- `light_on` と `night_light` の保存済み/未保存状態のブラウザ表示
+- 学習済み信号のテスト送信操作
+- 学習済み赤外線データと対応可能なセットアップ状態のリセット操作
 
-Excluded from v2:
+含めないもの:
 
-- Air conditioner support
-- Brightness control
-- Color temperature control
-- Multiple HomeKit accessories
+- エアコン対応
+- 明るさ制御
+- 色温度制御
+- 複数のHomeKitアクセサリ
 - MQTT
 - Alexa / Google Home
-- Home Assistant-specific integration
-- Multi-room support
+- Home Assistant固有連携
+- 複数部屋対応
