@@ -4,7 +4,9 @@
 
 Seeed Studio XIAO ESP32S3で、HomeKitから操作できる照明用スマートリモコンを作る。
 
-まずは1部屋の照明を確実にON/OFF相当で操作できることを優先する。エアコン対応はv1では対象外とし、照明が動いてから追加検討する。
+まずは1部屋の照明を確実にON/OFF相当で操作できることを優先する。v1はHomeSpanのみでWeb UIを作らない。Web UIはv2要件として後から追加する。
+
+エアコン対応はv1/v2では対象外とし、照明が動いてから追加検討する。
 
 ## Target Hardware
 
@@ -38,20 +40,20 @@ These pins may be changed in `include/config.h`.
 
 The physical light may not map to true power-off. In v1, HomeKit OFF intentionally means "常夜灯".
 
-### Web UI
+### Setup And Maintenance
 
-The Web UI is for setup and maintenance, not the primary daily controller.
+Do not build a custom Web UI for v1. Web UI belongs to v2.
 
-Required v1 screens/actions:
+Use HomeSpan-provided provisioning/setup behavior where possible, plus the physical config/reset button and serial monitor output for device-specific maintenance.
 
-- Wi-Fi setup through a temporary setup AP
+Required v1 actions:
+
+- Wi-Fi setup through HomeSpan-supported setup/provisioning flow
 - Learn "点灯" IR signal
 - Learn "常夜灯" IR signal
-- Show whether both required signals are stored
-- Test-send learned signals
-- Reset Wi-Fi/HomeKit/learned IR data
-
-Browser-based light operation is optional and can be included only if it is low cost.
+- Report whether both required signals are stored through serial logs
+- Test-send learned signals through HomeKit ON/OFF after setup
+- Reset Wi-Fi/HomeKit/learned IR data through button/serial-supported flows
 
 ## IR Learning
 
@@ -71,7 +73,7 @@ Browser-based light operation is optional and can be included only if it is low 
 
 ## Wi-Fi Provisioning
 
-- The device must provide a setup AP for initial Wi-Fi configuration.
+- Use HomeSpan-supported Wi-Fi provisioning/setup behavior.
 - Hard-coded Wi-Fi credentials are not acceptable for the intended public version.
 - If Wi-Fi configuration is missing or connection fails repeatedly, the device should enter setup mode.
 
@@ -79,13 +81,13 @@ Browser-based light operation is optional and can be included only if it is low 
 
 Support both reset paths:
 
-- Web UI reset action
 - External button on D3
+- Serial/HomeSpan-supported reset command where practical
 
 Button behavior for v1:
 
 - Short press: no required behavior
-- Long press: enter/reset setup state
+- Long press: enter setup/reset state
 
 Exact long-press duration can be decided during implementation.
 
@@ -106,8 +108,8 @@ Included:
 
 - XIAO ESP32S3 PlatformIO configuration
 - HomeSpan-based HomeKit Lightbulb accessory
-- Setup AP for Wi-Fi configuration
-- Web UI for IR learning and maintenance
+- HomeSpan-supported Wi-Fi provisioning/setup
+- Button/serial-driven IR learning and maintenance
 - Persistent storage of two learned IR commands
 - IR send through external transistor driver
 - README setup instructions
@@ -118,16 +120,38 @@ Excluded from v1:
 - Brightness control
 - Color temperature control
 - Multiple HomeKit accessories
+- Custom Web UI
 - MQTT
 - Alexa / Google Home
 - Home Assistant-specific integration
 - Multi-room support
 
-## Implementation Priority
+## v1 Implementation Priority
 
 1. Build and flash successfully on XIAO ESP32S3.
 2. Learn and save two IR commands.
-3. Test-send the saved IR commands from the Web UI.
-4. Expose HomeKit Lightbulb via HomeSpan.
-5. Map HomeKit ON/OFF to the saved IR commands.
-6. Add reset/setup handling.
+3. Expose HomeKit Lightbulb via HomeSpan.
+4. Map HomeKit ON/OFF to the saved IR commands.
+5. Add reset/setup handling.
+
+## v2 Scope
+
+v2 adds a custom Web UI for users who want browser-based setup and maintenance in addition to HomeKit.
+
+Included:
+
+- Web UI for IR learning and maintenance
+- Browser-visible stored/missing state for `light_on` and `night_light`
+- Test-send controls for learned signals
+- Reset controls for learned IR data and supported setup state
+
+Excluded from v2:
+
+- Air conditioner support
+- Brightness control
+- Color temperature control
+- Multiple HomeKit accessories
+- MQTT
+- Alexa / Google Home
+- Home Assistant-specific integration
+- Multi-room support
