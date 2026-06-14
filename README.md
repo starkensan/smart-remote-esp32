@@ -10,6 +10,7 @@ Seeed Studio XIAO ESP32S3で作るスマートリモコンのPlatformIOプロジ
 - HomeSpanによるWi-Fi設定とHomeKit連携
 - IR送信: 学習済みRAW信号
 - IR受信: 既存リモコンの「点灯」「常夜灯」信号を学習
+- HomeKitのONで「点灯」、OFFで「常夜灯」を送信
 - v1では独自Web UIなし
 
 ## 想定部品
@@ -58,6 +59,19 @@ pio device monitor
 
 - SSID: `SmartRemote-Setup`
 - Password: `homespan`
+
+6. Apple HomeアプリでHomeSpanのペアリングコードを使って追加します。
+
+ペアリングコードやQR情報はシリアルモニタに表示されます。必要に応じてHomeSpan CLIの `S` コマンドでセットアップコードを設定してください。
+
+## HomeKit操作
+
+HomeKit上では1つのLightbulbアクセサリとして表示されます。
+
+- ON: 学習済みの `light_on`、「点灯」信号を送信
+- OFF: 学習済みの `night_light`、「常夜灯」信号を送信
+
+未学習の状態でON/OFFすると、シリアルログに未学習であることを出力し、操作は失敗として扱います。
 
 ## HomeSpan CLI
 

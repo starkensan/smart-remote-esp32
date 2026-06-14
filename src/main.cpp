@@ -109,6 +109,33 @@ void commandCancelLearning(const char *) {
   cancelLearning();
 }
 
+bool sendStoredRawCommand(const char *commandId) {
+  ir_store::LearnedIrCommand command;
+  if (!irCommandStore.loadCommand(commandId, command)) {
+    Serial.printf("IR command %s is not learned yet.\n", commandId);
+    return false;
+  }
+
+  Serial.printf("Sending %s with %u RAW timings at %u kHz.\n", commandId,
+                command.rawLength, command.frequencyKhz);
+  irsend.sendRaw(command.raw, command.rawLength, command.frequencyKhz);
+  return true;
+}
+
+struct SmartRemoteLight : Service::LightBulb {
+  SpanCharacteristic *power;
+
+  SmartRemoteLight() : Service::LightBulb() {
+    power = new Characteristic::On();
+  }
+
+  boolean update() override {
+    const bool requestedOn = power->getNewVal();
+    return sendStoredRawCommand(requestedOn ? ir_store::kLightOnCommand
+                                           : ir_store::kNightLightCommand);
+  }
+};
+
 void handleConfigButton() {
   const bool pressed = digitalRead(CONFIG_BUTTON_PIN) == LOW;
   const uint32_t now = millis();
@@ -181,6 +208,15 @@ void setupHomeSpan() {
   homeSpan.setApPassword(SETUP_AP_PASSWORD);
   homeSpan.setApTimeout(300);
   homeSpan.begin(Category::Lighting, DEVICE_NAME);
+
+  new SpanAccessory();
+    new Service::AccessoryInformation();
+      new Characteristic::Identify();
+      new Characteristic::Name("Smart Remote Light");
+      new Characteristic::Manufacturer("starkensan");
+      new Characteristic::Model("XIAO ESP32S3 IR Remote");
+      new Characteristic::FirmwareRevision("0.1.0");
+    new SmartRemoteLight();
 
   new SpanUserCommand('o', " - learn light_on IR command", commandLearnLightOn);
   new SpanUserCommand('n', " - learn night_light IR command",
