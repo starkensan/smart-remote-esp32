@@ -1,12 +1,12 @@
 # ESP32 Smart Remote
 
-ESP32で作るスマートリモコンのPlatformIOプロジェクトです。赤外線LEDで家電に信号を送信し、赤外線受信モジュールでリモコン信号を学習できます。
+Seeed Studio XIAO ESP32S3で作るスマートリモコンのPlatformIOプロジェクトです。赤外線LEDで家電に信号を送信し、赤外線受信モジュールでリモコン信号を学習できます。
 
 現在のv1要件は [docs/requirements.md](docs/requirements.md) にまとめています。
 
 ## 機能
 
-- ESP32 DevKit向けArduino firmware
+- Seeed Studio XIAO ESP32S3向けArduino firmware
 - IR送信: NEC、SONY、PANASONIC、RAW
 - IR受信: 最後に受信した信号をWeb APIで確認
 - LittleFS配信の簡易Web UI
@@ -14,7 +14,7 @@ ESP32で作るスマートリモコンのPlatformIOプロジェクトです。�
 
 ## 想定部品
 
-- ESP32 DevKit
+- Seeed Studio XIAO ESP32S3
 - 赤外線LED
 - NPNトランジスタまたはMOSFET
 - 赤外線受信モジュール 38kHz品
@@ -22,11 +22,12 @@ ESP32で作るスマートリモコンのPlatformIOプロジェクトです。�
 
 ## 初期ピン
 
-| 用途 | GPIO |
+| 用途 | 初期ピン |
 | --- | --- |
-| IR送信 | 4 |
-| IR受信 | 15 |
-| ステータスLED | 2 |
+| IR送信 | D1 |
+| IR受信 | D2 |
+| 設定/リセットボタン | D3 |
+| ステータスLED | 未使用 |
 
 ピンは `include/config.h` で変更できます。
 
