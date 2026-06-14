@@ -9,6 +9,7 @@
 #include <WiFi.h>
 
 #include "config.h"
+#include "IrCommandStore.h"
 
 namespace {
 
@@ -19,6 +20,7 @@ IRsend irsend(IR_SEND_PIN);
 IRrecv irrecv(IR_RECV_PIN, kCaptureBufferSize, kIrTimeoutMs, true);
 decode_results results;
 WebServer server(HTTP_PORT);
+ir_store::IrCommandStore irCommandStore;
 
 String lastDecodedJson = "{}";
 uint32_t lastBlinkAt = 0;
@@ -197,6 +199,10 @@ void setup() {
   if (!LittleFS.begin(true)) {
     Serial.println("LittleFS mount failed.");
   }
+  if (!irCommandStore.begin()) {
+    Serial.println("IR command store initialization failed.");
+  }
+  irCommandStore.printStatus(Serial);
 
   irsend.begin();
   irrecv.enableIRIn();
