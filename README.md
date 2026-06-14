@@ -28,7 +28,7 @@ Seeed Studio XIAO ESP32S3で作るスマートリモコンのPlatformIOプロジ
 | IR送信 | D1 |
 | IR受信 | D2 |
 | 設定/リセットボタン | D3 |
-| ステータスLED | 未使用 |
+| ステータスLED | `include/config.h` で指定。不要なら `-1` |
 
 ピンは `include/config.h` で変更できます。
 
@@ -47,10 +47,30 @@ pio run
 pio run --target upload
 ```
 
+ポートを自動検出できない場合は、接続されているポートを確認します。
+
+```sh
+pio device list
+```
+
+ポートが分かっている場合は明示して書き込みます。
+
+```sh
+pio run --target upload --upload-port /dev/ttyACM0
+```
+
+XIAO ESP32S3が見つからない場合は、USBケーブルを確認し、必要に応じてBOOTを押しながらRESETしてブートローダーモードに入れてから再実行します。WSLや仮想環境を使っている場合は、USBデバイスがLinux側へ渡っていることも確認してください。
+
 4. シリアルモニタを開きます。
 
 ```sh
 pio device monitor
+```
+
+ポートを明示する場合:
+
+```sh
+pio device monitor --port /dev/ttyACM0
 ```
 
 5. HomeSpan CLIまたは起動する設定APでWi-Fiを設定します。
