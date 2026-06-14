@@ -18,6 +18,7 @@ constexpr uint8_t kIrTimeoutMs = 50;
 constexpr uint32_t kLearningTimeoutMs = 15000;
 constexpr uint32_t kButtonDebounceMs = 30;
 constexpr uint32_t kShortPressMaxMs = 1000;
+constexpr uint32_t kIrClearPressMs = 7000;
 
 IRsend irsend(IR_SEND_PIN);
 IRrecv irrecv(IR_RECV_PIN, kCaptureBufferSize, kIrTimeoutMs, true);
@@ -30,6 +31,7 @@ const char *learningCommandId = nullptr;
 uint32_t learningStartedAt = 0;
 bool buttonWasPressed = false;
 uint32_t buttonPressedAt = 0;
+bool buttonLongHandled = false;
 
 void blinkStatus(uint32_t intervalMs) {
   if (STATUS_LED_PIN < 0) {
@@ -109,6 +111,24 @@ void commandCancelLearning(const char *) {
   cancelLearning();
 }
 
+void clearLearnedIrCommands() {
+  if (learningCommandId != nullptr) {
+    learningCommandId = nullptr;
+    Serial.println("Canceled active learning before clearing stored IR commands.");
+  }
+
+  if (irCommandStore.clear() && irCommandStore.begin()) {
+    Serial.println("Cleared learned IR commands.");
+  } else {
+    Serial.println("Failed to clear learned IR commands.");
+  }
+  irCommandStore.printStatus(Serial);
+}
+
+void commandClearLearnedIr(const char *) {
+  clearLearnedIrCommands();
+}
+
 bool sendStoredRawCommand(const char *commandId) {
   ir_store::LearnedIrCommand command;
   if (!irCommandStore.loadCommand(commandId, command)) {
@@ -143,19 +163,29 @@ void handleConfigButton() {
   if (pressed && !buttonWasPressed) {
     buttonWasPressed = true;
     buttonPressedAt = now;
+    buttonLongHandled = false;
+    return;
+  }
+
+  if (pressed && buttonWasPressed && !buttonLongHandled &&
+      now - buttonPressedAt >= kIrClearPressMs) {
+    buttonLongHandled = true;
+    clearLearnedIrCommands();
     return;
   }
 
   if (!pressed && buttonWasPressed) {
     buttonWasPressed = false;
     const uint32_t pressMs = now - buttonPressedAt;
-    if (pressMs >= kButtonDebounceMs && pressMs <= kShortPressMaxMs) {
+    if (!buttonLongHandled && pressMs >= kButtonDebounceMs &&
+        pressMs <= kShortPressMaxMs) {
       if (learningCommandId == nullptr) {
         startNextButtonLearning();
       } else {
         cancelLearning();
       }
     }
+    buttonLongHandled = false;
   }
 }
 
@@ -225,6 +255,8 @@ void setupHomeSpan() {
                       commandPrintIrStatus);
   new SpanUserCommand('k', " - cancel active IR learning",
                       commandCancelLearning);
+  new SpanUserCommand('y', " - clear learned IR commands",
+                      commandClearLearnedIr);
 }
 
 }  // namespace

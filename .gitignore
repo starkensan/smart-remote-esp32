@@ -6,3 +6,5 @@
 compile_commands.json
 secrets.h
 data/config.json
+data/ir_commands.json
+ir_commands.json
