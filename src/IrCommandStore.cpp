@@ -81,7 +81,10 @@ bool IrCommandStore::saveCommand(const char *commandId, const uint16_t *raw,
   }
 
   doc[kVersionKey] = kSchemaVersion;
-  JsonObject commands = doc[kCommandsKey].to<JsonObject>();
+  JsonObject commands = doc[kCommandsKey].as<JsonObject>();
+  if (commands.isNull()) {
+    commands = doc[kCommandsKey].to<JsonObject>();
+  }
   JsonObject stored = commands[commandId].to<JsonObject>();
   stored[kFrequencyKey] = frequencyKhz;
   JsonArray timings = stored[kRawKey].to<JsonArray>();
