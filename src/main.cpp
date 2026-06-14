@@ -25,6 +25,10 @@ uint32_t lastBlinkAt = 0;
 bool ledState = false;
 
 void blinkStatus(uint32_t intervalMs) {
+  if (STATUS_LED_PIN < 0) {
+    return;
+  }
+
   const uint32_t now = millis();
   if (now - lastBlinkAt < intervalMs) {
     return;
@@ -185,8 +189,10 @@ void setupRoutes() {
 
 void setup() {
   Serial.begin(115200);
-  pinMode(STATUS_LED_PIN, OUTPUT);
-  digitalWrite(STATUS_LED_PIN, LOW);
+  if (STATUS_LED_PIN >= 0) {
+    pinMode(STATUS_LED_PIN, OUTPUT);
+    digitalWrite(STATUS_LED_PIN, LOW);
+  }
 
   if (!LittleFS.begin(true)) {
     Serial.println("LittleFS mount failed.");
