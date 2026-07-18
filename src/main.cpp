@@ -25,6 +25,30 @@ constexpr uint8_t kRequiredStableCaptures = 2;
 constexpr uint16_t kRawTimingToleranceUsec = 250;
 constexpr uint8_t kRawTimingTolerancePercent = 25;
 constexpr uint32_t kAutoSetupApDelayMs = 30000;
+constexpr uint8_t kSharpAcFrequencyKhz = 38;
+
+// SHARP_AC capture from the user's remote. The decoder reported 23C, but the
+// remote display was 25C, so send the captured RAW timings as authoritative.
+constexpr uint16_t kSharpAcCool25Raw[] = {
+    3822, 1894, 470,  458, 468, 1390, 462, 492, 464, 1346, 514, 490,
+    464,  1394, 466,  488, 462, 1338, 550, 462, 468, 1342, 510, 492,
+    460,  1400, 458,  1400, 462, 488, 466, 1272, 582, 492, 464, 1396,
+    466,  1418, 434,  1398, 460, 1396, 462, 492, 464, 492, 466, 1418,
+    436,  1420, 436,  492, 462, 492, 462, 494, 462, 494, 462, 1398,
+    462,  488, 464,  492, 460, 492, 464, 492, 462, 492, 462, 492,
+    468,  1416, 440,  488, 462, 494, 492, 462, 462, 492, 464, 1422,
+    468,  458, 462,  494, 462, 490, 464, 1422, 466, 1368, 462, 490,
+    460,  494, 466,  490, 462, 1422, 436, 490, 498, 458, 464, 490,
+    462,  1422, 436,  492, 462, 494, 460, 494, 464, 490, 464, 492,
+    464,  492, 524,  430, 468, 486, 462, 492, 524, 430, 464, 492,
+    498,  1388, 436,  492, 496, 1390, 436, 490, 464, 492, 496, 458,
+    464,  492, 496,  460, 464, 492, 460, 492, 524, 432, 464, 492,
+    466,  1418, 442,  488, 522, 1362, 498, 430, 470, 486, 494, 1388,
+    504,  426, 520,  434, 462, 492, 468, 488, 498, 456, 498, 460,
+    468,  488, 494,  1390, 438, 490, 462, 492, 468, 1416, 494, 1314,
+    518,  1388, 498,  1360, 498, 428, 464, 492, 462, 494, 462, 490,
+    464,  490, 524,  430, 526, 1360, 478,
+};
 
 IRsend irsend(IR_SEND_PIN);
 IRrecv irrecv(IR_RECV_PIN, kCaptureBufferSize, kIrTimeoutMs, true);
@@ -67,8 +91,13 @@ void printHelp() {
   Serial.println("IR learning commands in HomeSpan CLI:");
   Serial.println("  o - learn light_on");
   Serial.println("  n - learn night_light");
+  Serial.println("  a - send SHARP_AC cool 25C command");
   Serial.println("  q - show IR command status");
+  Serial.println("  p - show IR command details");
+  Serial.println("  O - send light_on 3 times");
+  Serial.println("  N - send night_light 3 times");
   Serial.println("  k - cancel active learning");
+  Serial.println("  y - clear learned IR commands");
 }
 
 void startLearning(const char *commandId) {
@@ -243,6 +272,22 @@ void commandSendNightLight(const char *) {
   sendStoredRawCommand(ir_store::kNightLightCommand, kIrSendRepeats);
 }
 
+bool sendSharpAcCool25Command() {
+  Serial.printf("Sending SHARP_AC cool 25C with %u RAW timings at %u kHz.\n",
+                sizeof(kSharpAcCool25Raw) / sizeof(kSharpAcCool25Raw[0]),
+                kSharpAcFrequencyKhz);
+  irrecv.disableIRIn();
+  irsend.sendRaw(kSharpAcCool25Raw,
+                 sizeof(kSharpAcCool25Raw) / sizeof(kSharpAcCool25Raw[0]),
+                 kSharpAcFrequencyKhz);
+  irrecv.enableIRIn();
+  return true;
+}
+
+void commandSendSharpAcCool25(const char *) {
+  sendSharpAcCool25Command();
+}
+
 void handleAutoSetupAp() {
   if (autoSetupApStarted || WiFi.status() == WL_CONNECTED) {
     wifiDisconnectedSince = 0;
@@ -277,6 +322,25 @@ struct SmartRemoteLight : Service::LightBulb {
     return sendStoredRawCommand(requestedOn ? ir_store::kLightOnCommand
                                            : ir_store::kNightLightCommand,
                                  kIrSendRepeats);
+  }
+};
+
+struct AirConditionerCool25Switch : Service::Switch {
+  SpanCharacteristic *power;
+
+  AirConditionerCool25Switch() : Service::Switch() {
+    new Characteristic::Name("Air Conditioner Cool 25C");
+    power = new Characteristic::On(false);
+  }
+
+  boolean update() override {
+    if (!power->getNewVal()) {
+      return true;
+    }
+
+    const bool sent = sendSharpAcCool25Command();
+    power->setVal(false);
+    return sent;
   }
 };
 
@@ -403,10 +467,13 @@ void setupHomeSpan() {
       new Characteristic::Model("XIAO ESP32S3 IR Remote");
       new Characteristic::FirmwareRevision("0.1.0");
     new SmartRemoteLight();
+    new AirConditionerCool25Switch();
 
   new SpanUserCommand('o', " - learn light_on IR command", commandLearnLightOn);
   new SpanUserCommand('n', " - learn night_light IR command",
                       commandLearnNightLight);
+  new SpanUserCommand('a', " - send SHARP_AC cool 25C command",
+                      commandSendSharpAcCool25);
   new SpanUserCommand('q', " - show learned IR command status",
                       commandPrintIrStatus);
   new SpanUserCommand('p', " - show learned IR command details",

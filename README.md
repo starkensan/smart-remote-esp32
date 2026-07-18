@@ -11,6 +11,7 @@ Seeed Studio XIAO ESP32S3で作るスマートリモコンのPlatformIOプロジ
 - IR送信: 学習済みRAW信号
 - IR受信: 既存リモコンの「点灯」「常夜灯」信号を学習
 - HomeKitのONで「点灯」、OFFで「常夜灯」を送信
+- HomeKitからSHARP製エアコンの冷房25度信号を送信
 - v1では独自Web UIなし
 
 ## 想定部品
@@ -86,12 +87,15 @@ pio device monitor --port /dev/ttyACM0
 
 ## HomeKit操作
 
-HomeKit上では1つのLightbulbアクセサリとして表示されます。
+HomeKit上では照明用のLightbulbサービスと、エアコン送信用のSwitchサービスが表示されます。
 
 - ON: 学習済みの `light_on`、「点灯」信号を送信
 - OFF: 学習済みの `night_light`、「常夜灯」信号を送信
+- Air Conditioner Cool 25C: ONにすると、SHARP_ACの冷房25度RAW信号を送信し、自動でOFF表示に戻る
 
 未学習の状態でON/OFFすると、シリアルログに未学習であることを出力し、操作は失敗として扱います。
+
+エアコン信号は提供された読み取り結果をそのままRAW送信します。解析結果では23度と表示されていますが、実リモコン表示が25度だったため、このプロジェクトでは「冷房25度」として扱います。エアコンOFF信号はまだ未登録です。
 
 ## HomeSpan CLI
 
@@ -101,6 +105,7 @@ HomeKit上では1つのLightbulbアクセサリとして表示されます。
 
 - `o`: 「点灯」信号を学習
 - `n`: 「常夜灯」信号を学習
+- `a`: SHARP_ACの冷房25度信号を送信
 - `q`: 学習済み信号の保存状態を表示
 - `k`: 学習中の操作をキャンセル
 - `y`: 学習済みIR信号を削除
