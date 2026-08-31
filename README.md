@@ -11,7 +11,8 @@ Seeed Studio XIAO ESP32S3で作るスマートリモコンのPlatformIOプロジ
 - IR送信: 学習済みRAW信号
 - IR受信: 既存リモコンの「点灯」「常夜灯」信号を学習
 - HomeKitのONで「点灯」、OFFで「常夜灯」を送信
-- HomeKitからSHARP製エアコンの冷房25度信号を送信
+- HomeKitからSHARP製エアコンの電源、冷暖房、除湿、温度、風量、風向を操作
+- LAN内HTTP APIからエアコン、照明を操作し、状態をJSONで取得
 - v1では独自Web UIなし
 
 ## 想定部品
@@ -91,11 +92,43 @@ HomeKit上では照明用のLightbulbサービスと、エアコン送信用のS
 
 - ON: 学習済みの `light_on`、「点灯」信号を送信
 - OFF: 学習済みの `night_light`、「常夜灯」信号を送信
-- Air Conditioner Cool 25C: ONにすると、SHARP_ACの冷房25度RAW信号を送信し、自動でOFF表示に戻る
+- Air Conditioner: 電源、冷房/暖房、設定温度、風量を操作
+- Air Conditioner Dry: 除湿運転をON/OFF
+- Air Conditioner Direction: 風向自動、固定1～5、全方向スイングを操作
 
 未学習の状態でON/OFFすると、シリアルログに未学習であることを出力し、操作は失敗として扱います。
 
-エアコン信号は提供された読み取り結果をそのままRAW送信します。解析結果では23度と表示されていますが、実リモコン表示が25度だったため、このプロジェクトでは「冷房25度」として扱います。エアコンOFF信号はまだ未登録です。
+エアコン信号は実機で確認した104-bit状態データを基に、SHARP_ACプロトコルとして動的に生成します。実リモコン表示温度はプロトコル解析値より2度高いため、送信時に補正します。風量は自動と1～4、風向は自動、固定1～5、全方向スイングに対応します。
+
+室温センサーは搭載していないため、HomeKitの現在温度には選択中の設定温度を表示します。エアコン状態は最後に送信した値を表示する推定状態であり、実機からの状態フィードバックではありません。
+
+## HTTP API
+
+Wi-Fi接続後、ポート`8080`でHTTP APIを起動します。IPアドレスが`192.168.0.16`の場合のベースURLは `http://192.168.0.16:8080` です。
+
+| メソッド | パス | 動作 |
+| --- | --- | --- |
+| `GET` | `/api/status` | エアコン、照明、HomeSpan、ネットワーク状態を取得 |
+| `GET` | `/api/ac` | 状態全体を取得 |
+| `GET` | `/api/light` | 状態全体を取得 |
+| `POST` | `/api/ac/off` | エアコンを停止 |
+| `POST` | `/api/ac/cool` | 冷房を開始 |
+| `POST` | `/api/ac/heat` | 暖房を開始 |
+| `POST` | `/api/light/on` | 照明の点灯信号を送信 |
+| `POST` | `/api/light/off` | 照明の常夜灯信号を送信 |
+
+冷房・暖房は、任意で`temperature=17..32`と`fan=0..4`をクエリ指定できます。`fan=0`は自動です。
+
+```sh
+curl http://192.168.0.16:8080/api/status
+curl -X POST "http://192.168.0.16:8080/api/ac/cool?temperature=25&fan=0"
+curl -X POST "http://192.168.0.16:8080/api/ac/heat?temperature=24&fan=2"
+curl -X POST http://192.168.0.16:8080/api/ac/off
+curl -X POST http://192.168.0.16:8080/api/light/on
+curl -X POST http://192.168.0.16:8080/api/light/off
+```
+
+APIとHomeSpanは同じ状態を共有します。API操作後はHomeアプリの特性値も更新され、Homeアプリからの操作も`GET /api/status`へ反映されます。APIには認証がないため、信頼できるローカルネットワーク内だけで使用してください。
 
 ## HomeSpan CLI
 
@@ -105,7 +138,7 @@ HomeKit上では照明用のLightbulbサービスと、エアコン送信用のS
 
 - `o`: 「点灯」信号を学習
 - `n`: 「常夜灯」信号を学習
-- `a`: SHARP_ACの冷房25度信号を送信
+- `a`: 現在保存されているSHARP_AC状態を送信
 - `q`: 学習済み信号の保存状態を表示
 - `k`: 学習中の操作をキャンセル
 - `y`: 学習済みIR信号を削除
@@ -113,20 +146,22 @@ HomeKit上では照明用のLightbulbサービスと、エアコン送信用のS
 ## ボタン操作
 
 - D3短押し: 未学習のIR信号を順に学習
-- D3を約7秒長押し: 学習済みIR信号を削除
-- D3をさらに長押し: HomeSpanのコントロールボタンとして、HomeSpan標準のコマンドモード/Factory Resetに入る
+- D3を約7秒長押し: HomeKitペアリング情報だけを削除して再起動
+
+D3長押しでは、Wi-Fi設定、学習済みIR信号、エアコン設定は削除しません。
 
 ## リセット
 
 学習済みIR信号だけを消す場合:
 
 - HomeSpan CLIで `y` を入力する
-- またはD3を約7秒長押しする
 
-Wi-Fi設定やHomeKitペアリング情報を消す場合:
+HomeKitペアリング情報だけを消す場合:
 
-- HomeSpan CLIの `X` や `F` など、HomeSpan標準コマンドを使う
-- またはD3をHomeSpanのFactory Reset時間まで長押しする
+- D3を約7秒長押しする
+- またはHomeSpan CLIで `U` を入力する
+
+Wi-Fi設定も消す場合はHomeSpan CLIの `X` や `F` などを使います。
 
 ## 配線メモ
 

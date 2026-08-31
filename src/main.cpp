@@ -1,12 +1,16 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <IRac.h>
 #include <IRrecv.h>
 #include <IRremoteESP8266.h>
 #include <IRsend.h>
 #include <IRutils.h>
 #include <LittleFS.h>
+#include <Preferences.h>
+#include <WebServer.h>
 #include <WiFi.h>
 #include <HomeSpan.h>
+#include <ir_Sharp.h>
 
 #include "config.h"
 #include "IrCommandStore.h"
@@ -18,42 +22,75 @@ constexpr uint8_t kIrTimeoutMs = 15;
 constexpr uint32_t kLearningTimeoutMs = 15000;
 constexpr uint32_t kButtonDebounceMs = 30;
 constexpr uint32_t kShortPressMaxMs = 1000;
-constexpr uint32_t kIrClearPressMs = 7000;
+constexpr uint32_t kHomeKitUnpairPressMs = 7000;
 constexpr uint16_t kIrSendRepeats = 3;
 constexpr uint16_t kIrRepeatGapMs = 80;
 constexpr uint8_t kRequiredStableCaptures = 2;
 constexpr uint16_t kRawTimingToleranceUsec = 250;
 constexpr uint8_t kRawTimingTolerancePercent = 25;
 constexpr uint32_t kAutoSetupApDelayMs = 30000;
-constexpr uint8_t kSharpAcFrequencyKhz = 38;
+constexpr uint8_t kAcDisplayMinTempC = 17;
+constexpr uint8_t kAcDisplayMaxTempC = 32;
+constexpr uint8_t kAcDisplayTempOffsetC = 2;
+constexpr uint16_t kAcSwingFrameGapMs = 80;
+constexpr uint16_t kApiServerPort = 8080;
 
-// SHARP_AC capture from the user's remote. The decoder reported 23C, but the
-// remote display was 25C, so send the captured RAW timings as authoritative.
-constexpr uint16_t kSharpAcCool25Raw[] = {
-    3822, 1894, 470,  458, 468, 1390, 462, 492, 464, 1346, 514, 490,
-    464,  1394, 466,  488, 462, 1338, 550, 462, 468, 1342, 510, 492,
-    460,  1400, 458,  1400, 462, 488, 466, 1272, 582, 492, 464, 1396,
-    466,  1418, 434,  1398, 460, 1396, 462, 492, 464, 492, 466, 1418,
-    436,  1420, 436,  492, 462, 492, 462, 494, 462, 494, 462, 1398,
-    462,  488, 464,  492, 460, 492, 464, 492, 462, 492, 462, 492,
-    468,  1416, 440,  488, 462, 494, 492, 462, 462, 492, 464, 1422,
-    468,  458, 462,  494, 462, 490, 464, 1422, 466, 1368, 462, 490,
-    460,  494, 466,  490, 462, 1422, 436, 490, 498, 458, 464, 490,
-    462,  1422, 436,  492, 462, 494, 460, 494, 464, 490, 464, 492,
-    464,  492, 524,  430, 468, 486, 462, 492, 524, 430, 464, 492,
-    498,  1388, 436,  492, 496, 1390, 436, 490, 464, 492, 496, 458,
-    464,  492, 496,  460, 464, 492, 460, 492, 524, 432, 464, 492,
-    466,  1418, 442,  488, 522, 1362, 498, 430, 470, 486, 494, 1388,
-    504,  426, 520,  434, 462, 492, 468, 488, 498, 456, 498, 460,
-    468,  488, 494,  1390, 438, 490, 462, 492, 468, 1416, 494, 1314,
-    518,  1388, 498,  1360, 498, 428, 464, 492, 462, 494, 462, 490,
-    464,  490, 524,  430, 526, 1360, 478,
+// A907 baseline captured at cool 25C, fan auto, fixed direction 2.
+constexpr uint8_t kSharpAcStateTemplate[kSharpAcStateLength] = {
+    0xAA, 0x5A, 0xCF, 0x10, 0x08, 0x31, 0x22,
+    0x00, 0x0A, 0xA0, 0x00, 0xE4, 0xC1,
 };
 
+enum class AcMode : uint8_t {
+  Cool,
+  Heat,
+  Dry,
+};
+
+enum class AcChange : uint8_t {
+  PowerOrMode,
+  Temperature,
+  Fan,
+  Direction,
+};
+
+struct AcState {
+  bool power = false;
+  AcMode mode = AcMode::Cool;
+  uint8_t coolTempC = 25;
+  uint8_t heatTempC = 25;
+  uint8_t fanLevel = 0;   // 0=auto, 1..4=remote fan levels.
+  uint8_t direction = 0;  // 0=auto, 1..5=fixed top-to-bottom.
+  bool fullSwing = false;
+};
+
+constexpr uint8_t kAcFanCodes[] = {2, 3, 5, 7, 6};
+
 IRsend irsend(IR_SEND_PIN);
+IRSharpAc sharpAc(IR_SEND_PIN);
 IRrecv irrecv(IR_RECV_PIN, kCaptureBufferSize, kIrTimeoutMs, true);
 decode_results results;
 ir_store::IrCommandStore irCommandStore;
+Preferences acPreferences;
+WebServer apiServer(kApiServerPort);
+AcState acState;
+bool acPreferencesReady = false;
+bool apiServerStarted = false;
+bool lightPowerState = false;
+
+SpanCharacteristic *lightPowerCharacteristic = nullptr;
+SpanCharacteristic *acActiveCharacteristic = nullptr;
+SpanCharacteristic *acCurrentTemperatureCharacteristic = nullptr;
+SpanCharacteristic *acCurrentStateCharacteristic = nullptr;
+SpanCharacteristic *acTargetStateCharacteristic = nullptr;
+SpanCharacteristic *acCoolingTemperatureCharacteristic = nullptr;
+SpanCharacteristic *acHeatingTemperatureCharacteristic = nullptr;
+SpanCharacteristic *acFanCharacteristic = nullptr;
+SpanCharacteristic *acDryCharacteristic = nullptr;
+SpanCharacteristic *acSlatStateCharacteristic = nullptr;
+SpanCharacteristic *acSwingCharacteristic = nullptr;
+SpanCharacteristic *acCurrentTiltCharacteristic = nullptr;
+SpanCharacteristic *acTargetTiltCharacteristic = nullptr;
 
 uint32_t lastBlinkAt = 0;
 uint32_t wifiDisconnectedSince = 0;
@@ -66,6 +103,140 @@ uint8_t stableCaptureCount = 0;
 bool buttonWasPressed = false;
 uint32_t buttonPressedAt = 0;
 bool buttonLongHandled = false;
+
+uint8_t clampAcTemperature(uint8_t temperature) {
+  return constrain(temperature, kAcDisplayMinTempC, kAcDisplayMaxTempC);
+}
+
+uint8_t acModeCode(AcMode mode) {
+  switch (mode) {
+    case AcMode::Heat:
+      return kSharpAcHeat;
+    case AcMode::Dry:
+      return kSharpAcDry;
+    case AcMode::Cool:
+    default:
+      return kSharpAcCool;
+  }
+}
+
+uint8_t selectedAcTemperature() {
+  return acState.mode == AcMode::Heat ? acState.heatTempC
+                                      : acState.coolTempC;
+}
+
+uint8_t acSpecialCode(AcChange change) {
+  switch (change) {
+    case AcChange::Temperature:
+      return kSharpAcSpecialTempEcono;
+    case AcChange::Fan:
+      return kSharpAcSpecialFan;
+    case AcChange::Direction:
+      return kSharpAcSpecialSwing;
+    case AcChange::PowerOrMode:
+    default:
+      return kSharpAcSpecialPower;
+  }
+}
+
+void buildSharpAcState(uint8_t output[kSharpAcStateLength], AcChange change,
+                       uint8_t directionCode) {
+  memcpy(output, kSharpAcStateTemplate, kSharpAcStateLength);
+
+  output[4] = acState.mode == AcMode::Dry
+                  ? 0
+                  : clampAcTemperature(selectedAcTemperature()) -
+                        kAcDisplayTempOffsetC - kSharpAcMinTemp;
+  output[5] = acState.power ? 0x31 : 0x21;
+
+  const uint8_t fanCode =
+      acState.mode == AcMode::Dry
+          ? kSharpAcFanAuto
+          : kAcFanCodes[constrain(acState.fanLevel, 0, 4)];
+  output[6] = static_cast<uint8_t>((fanCode << 4) | acModeCode(acState.mode));
+  output[8] = static_cast<uint8_t>(0x08 | (directionCode & 0x07));
+  output[10] = acSpecialCode(change);
+  // The low nibble is a fixed protocol marker. IRSharpAc::getRaw() replaces
+  // only the high checksum nibble, so preserve the captured 0x1 marker.
+  output[12] = 0x01;
+
+  sharpAc.setRaw(output);
+  memcpy(output, sharpAc.getRaw(), kSharpAcStateLength);
+}
+
+void printSentAcState(const uint8_t state[kSharpAcStateLength]) {
+  Serial.print("  state[13] = {");
+  for (uint8_t i = 0; i < kSharpAcStateLength; i++) {
+    Serial.printf("%s0x%02X", i == 0 ? "" : ", ", state[i]);
+  }
+  Serial.println("};");
+}
+
+bool sendSharpAcFrame(AcChange change, uint8_t directionCode) {
+  uint8_t state[kSharpAcStateLength];
+  buildSharpAcState(state, change, directionCode);
+  sharpAc.setRaw(state);
+  printSentAcState(state);
+  sharpAc.send();
+  return true;
+}
+
+bool sendSharpAcState(AcChange change) {
+  Serial.printf(
+      "Sending SHARP_AC: power=%s mode=%u temp=%uC fan=%u direction=%s%u.\n",
+      acState.power ? "on" : "off", static_cast<uint8_t>(acState.mode),
+      selectedAcTemperature(), acState.fanLevel,
+      acState.fullSwing ? "swing/" : "", acState.direction);
+
+  irrecv.disableIRIn();
+  bool sent = true;
+  if (change == AcChange::Direction && acState.fullSwing) {
+    sent = sendSharpAcFrame(change, 5);
+    delay(kAcSwingFrameGapMs);
+    sent = sendSharpAcFrame(change, kSharpAcSwingVToggle) && sent;
+  } else {
+    const uint8_t directionCode =
+        acState.fullSwing ? kSharpAcSwingVToggle : acState.direction;
+    sent = sendSharpAcFrame(change, directionCode);
+  }
+  irrecv.enableIRIn();
+  return sent;
+}
+
+void saveAcState() {
+  if (!acPreferencesReady) {
+    return;
+  }
+  acPreferences.putBool("power", acState.power);
+  acPreferences.putUChar("mode", static_cast<uint8_t>(acState.mode));
+  acPreferences.putUChar("coolTemp", acState.coolTempC);
+  acPreferences.putUChar("heatTemp", acState.heatTempC);
+  acPreferences.putUChar("fan", acState.fanLevel);
+  acPreferences.putUChar("direction", acState.direction);
+  acPreferences.putBool("swing", acState.fullSwing);
+}
+
+void loadAcState() {
+  acPreferencesReady = acPreferences.begin("sharp-ac", false);
+  if (!acPreferencesReady) {
+    Serial.println("Failed to open SHARP_AC preferences.");
+    return;
+  }
+
+  acState.power = acPreferences.getBool("power", false);
+  const uint8_t storedMode = acPreferences.getUChar("mode", 0);
+  acState.mode = storedMode <= static_cast<uint8_t>(AcMode::Dry)
+                     ? static_cast<AcMode>(storedMode)
+                     : AcMode::Cool;
+  acState.coolTempC = clampAcTemperature(
+      acPreferences.getUChar("coolTemp", acState.coolTempC));
+  acState.heatTempC = clampAcTemperature(
+      acPreferences.getUChar("heatTemp", acState.heatTempC));
+  acState.fanLevel = constrain(acPreferences.getUChar("fan", 0), 0, 4);
+  acState.direction =
+      constrain(acPreferences.getUChar("direction", 0), 0, 5);
+  acState.fullSwing = acPreferences.getBool("swing", false);
+}
 
 void blinkStatus(uint32_t intervalMs) {
   if (STATUS_LED_PIN < 0) {
@@ -91,7 +262,7 @@ void printHelp() {
   Serial.println("IR learning commands in HomeSpan CLI:");
   Serial.println("  o - learn light_on");
   Serial.println("  n - learn night_light");
-  Serial.println("  a - send SHARP_AC cool 25C command");
+  Serial.println("  a - send current SHARP_AC state");
   Serial.println("  q - show IR command status");
   Serial.println("  p - show IR command details");
   Serial.println("  O - send light_on 3 times");
@@ -177,6 +348,19 @@ void commandClearLearnedIr(const char *) {
   clearLearnedIrCommands();
 }
 
+void unpairHomeKit() {
+  if (learningCommandId != nullptr) {
+    learningCommandId = nullptr;
+    resetLearningCandidate();
+  }
+  Serial.println(
+      "Deleting HomeKit pairing data. Wi-Fi, IR learning, and AC settings "
+      "will be preserved.");
+  homeSpan.processSerialCommand("U");
+  delay(500);
+  homeSpan.processSerialCommand("R");
+}
+
 void printRawPreview(const uint16_t *raw, size_t rawLength) {
   const size_t previewLength = rawLength < 16 ? rawLength : 16;
   Serial.print("  raw preview:");
@@ -187,6 +371,24 @@ void printRawPreview(const uint16_t *raw, size_t rawLength) {
     Serial.print(" ...");
   }
   Serial.println();
+}
+
+void printAcStateDetails(const decode_results &decoded) {
+  if (!hasACState(decoded.decode_type) || decoded.bits == 0) {
+    return;
+  }
+
+  const uint16_t stateLength = (decoded.bits + 7) / 8;
+  Serial.printf("  state[%u] = {", stateLength);
+  for (uint16_t i = 0; i < stateLength; i++) {
+    Serial.printf("%s0x%02X", i == 0 ? "" : ", ", decoded.state[i]);
+  }
+  Serial.println("};");
+
+  const String description = IRAcUtils::resultAcToString(&decoded);
+  if (!description.isEmpty()) {
+    Serial.printf("  description: %s\n", description.c_str());
+  }
 }
 
 bool rawTimingsMatch(const uint16_t *expected, const uint16_t *actual,
@@ -272,20 +474,8 @@ void commandSendNightLight(const char *) {
   sendStoredRawCommand(ir_store::kNightLightCommand, kIrSendRepeats);
 }
 
-bool sendSharpAcCool25Command() {
-  Serial.printf("Sending SHARP_AC cool 25C with %u RAW timings at %u kHz.\n",
-                sizeof(kSharpAcCool25Raw) / sizeof(kSharpAcCool25Raw[0]),
-                kSharpAcFrequencyKhz);
-  irrecv.disableIRIn();
-  irsend.sendRaw(kSharpAcCool25Raw,
-                 sizeof(kSharpAcCool25Raw) / sizeof(kSharpAcCool25Raw[0]),
-                 kSharpAcFrequencyKhz);
-  irrecv.enableIRIn();
-  return true;
-}
-
-void commandSendSharpAcCool25(const char *) {
-  sendSharpAcCool25Command();
+void commandSendSharpAcState(const char *) {
+  sendSharpAcState(AcChange::PowerOrMode);
 }
 
 void handleAutoSetupAp() {
@@ -315,32 +505,259 @@ struct SmartRemoteLight : Service::LightBulb {
 
   SmartRemoteLight() : Service::LightBulb() {
     power = new Characteristic::On();
+    lightPowerCharacteristic = power;
+    lightPowerState = power->getVal();
   }
 
   boolean update() override {
     const bool requestedOn = power->getNewVal();
-    return sendStoredRawCommand(requestedOn ? ir_store::kLightOnCommand
-                                           : ir_store::kNightLightCommand,
-                                 kIrSendRepeats);
+    const bool sent =
+        sendStoredRawCommand(requestedOn ? ir_store::kLightOnCommand
+                                         : ir_store::kNightLightCommand,
+                             kIrSendRepeats);
+    if (sent) {
+      lightPowerState = requestedOn;
+    }
+    return sent;
   }
 };
 
-struct AirConditionerCool25Switch : Service::Switch {
-  SpanCharacteristic *power;
+int acDirectionToTilt(uint8_t direction) {
+  constexpr int kDirectionTilts[] = {-90, -60, -30, 0, 30, 60};
+  return kDirectionTilts[constrain(direction, 0, 5)];
+}
 
-  AirConditionerCool25Switch() : Service::Switch() {
-    new Characteristic::Name("Air Conditioner Cool 25C");
-    power = new Characteristic::On(false);
+uint8_t acTiltToDirection(int tilt) {
+  if (tilt < -75) return 0;
+  if (tilt < -45) return 1;
+  if (tilt < -15) return 2;
+  if (tilt < 15) return 3;
+  if (tilt < 45) return 4;
+  return 5;
+}
+
+uint8_t currentHeaterCoolerState() {
+  if (!acState.power) {
+    return 0;  // INACTIVE
+  }
+  if (acState.mode == AcMode::Heat) {
+    return 2;  // HEATING
+  }
+  if (acState.mode == AcMode::Cool) {
+    return 3;  // COOLING
+  }
+  return 1;  // IDLE (HomeKit has no dry state).
+}
+
+void syncAcCharacteristics() {
+  if (acActiveCharacteristic != nullptr &&
+      !acActiveCharacteristic->updated()) {
+    acActiveCharacteristic->setVal(acState.power);
+  }
+  if (acCurrentTemperatureCharacteristic != nullptr &&
+      !acCurrentTemperatureCharacteristic->updated()) {
+    // No room sensor is installed, so mirror the selected setpoint.
+    acCurrentTemperatureCharacteristic->setVal(selectedAcTemperature());
+  }
+  if (acCurrentStateCharacteristic != nullptr &&
+      !acCurrentStateCharacteristic->updated()) {
+    acCurrentStateCharacteristic->setVal(currentHeaterCoolerState());
+  }
+  if (acTargetStateCharacteristic != nullptr &&
+      !acTargetStateCharacteristic->updated() && acState.mode != AcMode::Dry) {
+    acTargetStateCharacteristic->setVal(acState.mode == AcMode::Heat ? 1 : 2);
+  }
+  if (acCoolingTemperatureCharacteristic != nullptr &&
+      !acCoolingTemperatureCharacteristic->updated()) {
+    acCoolingTemperatureCharacteristic->setVal(acState.coolTempC);
+  }
+  if (acHeatingTemperatureCharacteristic != nullptr &&
+      !acHeatingTemperatureCharacteristic->updated()) {
+    acHeatingTemperatureCharacteristic->setVal(acState.heatTempC);
+  }
+  if (acFanCharacteristic != nullptr && !acFanCharacteristic->updated()) {
+    acFanCharacteristic->setVal(acState.fanLevel * 25);
+  }
+  if (acDryCharacteristic != nullptr && !acDryCharacteristic->updated()) {
+    acDryCharacteristic->setVal(acState.power && acState.mode == AcMode::Dry);
+  }
+  if (acSlatStateCharacteristic != nullptr &&
+      !acSlatStateCharacteristic->updated()) {
+    acSlatStateCharacteristic->setVal(acState.fullSwing ? 2 : 0);
+  }
+  if (acSwingCharacteristic != nullptr && !acSwingCharacteristic->updated()) {
+    acSwingCharacteristic->setVal(acState.fullSwing);
+  }
+  const int tilt = acDirectionToTilt(acState.direction);
+  if (acCurrentTiltCharacteristic != nullptr &&
+      !acCurrentTiltCharacteristic->updated()) {
+    acCurrentTiltCharacteristic->setVal(tilt);
+  }
+  if (acTargetTiltCharacteristic != nullptr &&
+      !acTargetTiltCharacteristic->updated()) {
+    acTargetTiltCharacteristic->setVal(tilt);
+  }
+}
+
+bool commitAcState(AcChange change, bool transmit) {
+  const bool sent = !transmit || sendSharpAcState(change);
+  if (sent) {
+    saveAcState();
+    syncAcCharacteristics();
+  }
+  return sent;
+}
+
+struct AirConditionerHeaterCooler : Service::HeaterCooler {
+  SpanCharacteristic *active;
+  SpanCharacteristic *currentTemperature;
+  SpanCharacteristic *currentState;
+  SpanCharacteristic *targetState;
+  SpanCharacteristic *coolingTemperature;
+  SpanCharacteristic *heatingTemperature;
+  SpanCharacteristic *fan;
+
+  AirConditionerHeaterCooler() : Service::HeaterCooler() {
+    new Characteristic::Name("Air Conditioner");
+    active = new Characteristic::Active(acState.power);
+    currentTemperature =
+        new Characteristic::CurrentTemperature(selectedAcTemperature());
+    currentState =
+        new Characteristic::CurrentHeaterCoolerState(currentHeaterCoolerState());
+    targetState = new Characteristic::TargetHeaterCoolerState(
+        acState.mode == AcMode::Heat ? 1 : 2);
+    targetState->setValidValues(2, 1, 2);
+    coolingTemperature =
+        new Characteristic::CoolingThresholdTemperature(acState.coolTempC);
+    coolingTemperature->setRange(kAcDisplayMinTempC, kAcDisplayMaxTempC, 1);
+    heatingTemperature =
+        new Characteristic::HeatingThresholdTemperature(acState.heatTempC);
+    heatingTemperature->setRange(kAcDisplayMinTempC, kAcDisplayMaxTempC, 1);
+    fan = new Characteristic::RotationSpeed(acState.fanLevel * 25);
+    fan->setRange(0, 100, 25);
+    new Characteristic::TemperatureDisplayUnits(0);
+
+    acActiveCharacteristic = active;
+    acCurrentTemperatureCharacteristic = currentTemperature;
+    acCurrentStateCharacteristic = currentState;
+    acTargetStateCharacteristic = targetState;
+    acCoolingTemperatureCharacteristic = coolingTemperature;
+    acHeatingTemperatureCharacteristic = heatingTemperature;
+    acFanCharacteristic = fan;
   }
 
   boolean update() override {
-    if (!power->getNewVal()) {
-      return true;
+    bool shouldTransmit = false;
+    bool powerOrModeChanged = false;
+    bool fanChanged = false;
+
+    if (targetState->updated()) {
+      acState.mode = targetState->getNewVal() == 1 ? AcMode::Heat : AcMode::Cool;
+      shouldTransmit = acState.power;
+      powerOrModeChanged = true;
+    }
+    if (coolingTemperature->updated()) {
+      acState.coolTempC = clampAcTemperature(
+          static_cast<uint8_t>(coolingTemperature->getNewVal()));
+      if (acState.power && acState.mode == AcMode::Cool) {
+        shouldTransmit = true;
+      }
+    }
+    if (heatingTemperature->updated()) {
+      acState.heatTempC = clampAcTemperature(
+          static_cast<uint8_t>(heatingTemperature->getNewVal()));
+      if (acState.power && acState.mode == AcMode::Heat) {
+        shouldTransmit = true;
+      }
+    }
+    if (fan->updated()) {
+      const float requestedSpeed = fan->getNewVal();
+      acState.fanLevel = constrain(
+          static_cast<int>((requestedSpeed + 12.5f) / 25.0f), 0, 4);
+      if (acState.power && acState.mode != AcMode::Dry) {
+        shouldTransmit = true;
+        fanChanged = true;
+      }
+    }
+    if (active->updated()) {
+      acState.power = active->getNewVal();
+      if (acState.power && acState.mode == AcMode::Dry) {
+        acState.mode = targetState->getVal() == 1 ? AcMode::Heat : AcMode::Cool;
+      }
+      shouldTransmit = true;
+      powerOrModeChanged = true;
     }
 
-    const bool sent = sendSharpAcCool25Command();
-    power->setVal(false);
-    return sent;
+    const AcChange change =
+        powerOrModeChanged
+            ? AcChange::PowerOrMode
+            : fanChanged ? AcChange::Fan : AcChange::Temperature;
+    return commitAcState(change, shouldTransmit);
+  }
+};
+
+struct AirConditionerDrySwitch : Service::Switch {
+  SpanCharacteristic *dry;
+
+  AirConditionerDrySwitch() : Service::Switch() {
+    new Characteristic::Name("Air Conditioner Dry");
+    dry =
+        new Characteristic::On(acState.power && acState.mode == AcMode::Dry);
+    acDryCharacteristic = dry;
+  }
+
+  boolean update() override {
+    const bool requestedDry = dry->getNewVal();
+    if (requestedDry) {
+      acState.mode = AcMode::Dry;
+      acState.power = true;
+      return commitAcState(AcChange::PowerOrMode, true);
+    }
+    if (acState.mode == AcMode::Dry) {
+      acState.power = false;
+      return commitAcState(AcChange::PowerOrMode, true);
+    }
+    syncAcCharacteristics();
+    return true;
+  }
+};
+
+struct AirConditionerSlat : Service::Slat {
+  SpanCharacteristic *currentState;
+  SpanCharacteristic *swing;
+  SpanCharacteristic *currentTilt;
+  SpanCharacteristic *targetTilt;
+
+  AirConditionerSlat() : Service::Slat() {
+    new Characteristic::Name("Air Conditioner Direction");
+    currentState =
+        new Characteristic::CurrentSlatState(acState.fullSwing ? 2 : 0);
+    new Characteristic::SlatType(0);
+    swing = new Characteristic::SwingMode(acState.fullSwing);
+    currentTilt =
+        new Characteristic::CurrentTiltAngle(acDirectionToTilt(acState.direction));
+    targetTilt =
+        new Characteristic::TargetTiltAngle(acDirectionToTilt(acState.direction));
+    targetTilt->setRange(-90, 60, 30);
+
+    acSlatStateCharacteristic = currentState;
+    acSwingCharacteristic = swing;
+    acCurrentTiltCharacteristic = currentTilt;
+    acTargetTiltCharacteristic = targetTilt;
+  }
+
+  boolean update() override {
+    bool changed = false;
+    if (targetTilt->updated()) {
+      acState.direction = acTiltToDirection(targetTilt->getNewVal());
+      acState.fullSwing = false;
+      changed = true;
+    }
+    if (swing->updated()) {
+      acState.fullSwing = swing->getNewVal();
+      changed = true;
+    }
+    return commitAcState(AcChange::Direction, changed && acState.power);
   }
 };
 
@@ -356,9 +773,9 @@ void handleConfigButton() {
   }
 
   if (pressed && buttonWasPressed && !buttonLongHandled &&
-      now - buttonPressedAt >= kIrClearPressMs) {
+      now - buttonPressedAt >= kHomeKitUnpairPressMs) {
     buttonLongHandled = true;
-    clearLearnedIrCommands();
+    unpairHomeKit();
     return;
   }
 
@@ -447,12 +864,197 @@ void updateLastDecoded() {
                 typeToString(results.decode_type).c_str(),
                 uint64ToString(results.value, 16).c_str(), results.bits,
                 results.rawlen);
+  printAcStateDetails(results);
   irrecv.resume();
+}
+
+const char *acModeName(AcMode mode) {
+  switch (mode) {
+    case AcMode::Heat:
+      return "heat";
+    case AcMode::Dry:
+      return "dry";
+    case AcMode::Cool:
+    default:
+      return "cool";
+  }
+}
+
+const char *acDirectionName() {
+  if (acState.fullSwing) {
+    return "swing";
+  }
+  if (acState.direction == 0) {
+    return "auto";
+  }
+  return "fixed";
+}
+
+bool homeKitIsPaired() {
+  return homeSpan.controllerListBegin() != homeSpan.controllerListEnd();
+}
+
+void populateApiStatus(JsonDocument &document) {
+  document["ok"] = true;
+
+  JsonObject ac = document["air_conditioner"].to<JsonObject>();
+  ac["power"] = acState.power;
+  ac["mode"] = acModeName(acState.mode);
+  ac["temperature_c"] = selectedAcTemperature();
+  ac["cool_temperature_c"] = acState.coolTempC;
+  ac["heat_temperature_c"] = acState.heatTempC;
+  ac["fan_level"] = acState.fanLevel;
+  ac["direction_type"] = acDirectionName();
+  ac["direction"] = acState.direction;
+  ac["full_swing"] = acState.fullSwing;
+
+  JsonObject light = document["light"].to<JsonObject>();
+  light["on"] = lightPowerState;
+  light["off_command"] = "night_light";
+  light["on_learned"] =
+      irCommandStore.hasCommand(ir_store::kLightOnCommand);
+  light["off_learned"] =
+      irCommandStore.hasCommand(ir_store::kNightLightCommand);
+
+  JsonObject homeKit = document["homespan"].to<JsonObject>();
+  homeKit["paired"] = homeKitIsPaired();
+  homeKit["state_linked"] = true;
+
+  JsonObject network = document["network"].to<JsonObject>();
+  network["wifi_connected"] = WiFi.status() == WL_CONNECTED;
+  network["ip"] = WiFi.localIP().toString();
+  network["api_port"] = kApiServerPort;
+}
+
+void sendApiJson(int statusCode, JsonDocument &document) {
+  String response;
+  serializeJson(document, response);
+  apiServer.send(statusCode, "application/json; charset=utf-8", response);
+}
+
+void sendApiStatus(int statusCode = 200) {
+  JsonDocument document;
+  populateApiStatus(document);
+  sendApiJson(statusCode, document);
+}
+
+void sendApiError(int statusCode, const char *error) {
+  JsonDocument document;
+  document["ok"] = false;
+  document["error"] = error;
+  sendApiJson(statusCode, document);
+}
+
+bool parseOptionalApiInteger(const char *name, int minimum, int maximum,
+                             int &output) {
+  if (!apiServer.hasArg(name)) {
+    return true;
+  }
+
+  const String value = apiServer.arg(name);
+  char *end = nullptr;
+  const long parsed = strtol(value.c_str(), &end, 10);
+  if (value.isEmpty() || end == nullptr || *end != '\0' || parsed < minimum ||
+      parsed > maximum) {
+    String message = String(name) + " must be between " + minimum + " and " +
+                     maximum;
+    sendApiError(400, message.c_str());
+    return false;
+  }
+  output = static_cast<int>(parsed);
+  return true;
+}
+
+void handleApiAcOn(AcMode mode) {
+  int temperature =
+      mode == AcMode::Heat ? acState.heatTempC : acState.coolTempC;
+  int fanLevel = acState.fanLevel;
+  if (!parseOptionalApiInteger("temperature", kAcDisplayMinTempC,
+                               kAcDisplayMaxTempC, temperature) ||
+      !parseOptionalApiInteger("fan", 0, 4, fanLevel)) {
+    return;
+  }
+
+  acState.mode = mode;
+  acState.power = true;
+  acState.fanLevel = fanLevel;
+  if (mode == AcMode::Heat) {
+    acState.heatTempC = temperature;
+  } else {
+    acState.coolTempC = temperature;
+  }
+
+  if (!commitAcState(AcChange::PowerOrMode, true)) {
+    sendApiError(500, "failed to send SHARP_AC state");
+    return;
+  }
+  sendApiStatus();
+}
+
+void handleApiAcOff() {
+  acState.power = false;
+  if (!commitAcState(AcChange::PowerOrMode, true)) {
+    sendApiError(500, "failed to send SHARP_AC off state");
+    return;
+  }
+  sendApiStatus();
+}
+
+void handleApiLight(bool requestedOn) {
+  const char *commandId = requestedOn ? ir_store::kLightOnCommand
+                                      : ir_store::kNightLightCommand;
+  if (!sendStoredRawCommand(commandId, kIrSendRepeats)) {
+    sendApiError(409, requestedOn ? "light_on is not learned"
+                                  : "night_light is not learned");
+    return;
+  }
+
+  lightPowerState = requestedOn;
+  if (lightPowerCharacteristic != nullptr) {
+    lightPowerCharacteristic->setVal(requestedOn);
+  }
+  sendApiStatus();
+}
+
+void setupApiServer() {
+  apiServer.enableCORS(true);
+  apiServer.on("/", HTTP_GET, []() { sendApiStatus(); });
+  apiServer.on("/api/status", HTTP_GET, []() { sendApiStatus(); });
+  apiServer.on("/api/ac", HTTP_GET, []() { sendApiStatus(); });
+  apiServer.on("/api/light", HTTP_GET, []() { sendApiStatus(); });
+  apiServer.on("/api/ac/off", HTTP_POST, handleApiAcOff);
+  apiServer.on("/api/ac/cool", HTTP_POST,
+               []() { handleApiAcOn(AcMode::Cool); });
+  apiServer.on("/api/ac/heat", HTTP_POST,
+               []() { handleApiAcOn(AcMode::Heat); });
+  apiServer.on("/api/light/on", HTTP_POST,
+               []() { handleApiLight(true); });
+  apiServer.on("/api/light/off", HTTP_POST,
+               []() { handleApiLight(false); });
+  apiServer.onNotFound(
+      []() { sendApiError(404, "API endpoint not found"); });
+}
+
+void handleApiServer() {
+  if (WiFi.status() != WL_CONNECTED) {
+    if (apiServerStarted) {
+      apiServer.stop();
+      apiServerStarted = false;
+    }
+    return;
+  }
+
+  if (!apiServerStarted) {
+    apiServer.begin();
+    apiServerStarted = true;
+    Serial.printf("HTTP API ready at http://%s:%u/api/status\n",
+                  WiFi.localIP().toString().c_str(), kApiServerPort);
+  }
+  apiServer.handleClient();
 }
 
 void setupHomeSpan() {
   homeSpan.setLogLevel(1);
-  homeSpan.setControlPin(CONFIG_BUTTON_PIN);
   homeSpan.setApSSID(SETUP_AP_SSID);
   homeSpan.setApPassword(SETUP_AP_PASSWORD);
   homeSpan.setApTimeout(300);
@@ -465,15 +1067,19 @@ void setupHomeSpan() {
       new Characteristic::Name("Smart Remote Light");
       new Characteristic::Manufacturer("starkensan");
       new Characteristic::Model("XIAO ESP32S3 IR Remote");
-      new Characteristic::FirmwareRevision("0.1.0");
+      new Characteristic::FirmwareRevision("0.2.0");
     new SmartRemoteLight();
-    new AirConditionerCool25Switch();
+    new AirConditionerHeaterCooler();
+    new AirConditionerDrySwitch();
+    new AirConditionerSlat();
+
+  syncAcCharacteristics();
 
   new SpanUserCommand('o', " - learn light_on IR command", commandLearnLightOn);
   new SpanUserCommand('n', " - learn night_light IR command",
                       commandLearnNightLight);
-  new SpanUserCommand('a', " - send SHARP_AC cool 25C command",
-                      commandSendSharpAcCool25);
+  new SpanUserCommand('a', " - send current SHARP_AC state",
+                      commandSendSharpAcState);
   new SpanUserCommand('q', " - show learned IR command status",
                       commandPrintIrStatus);
   new SpanUserCommand('p', " - show learned IR command details",
@@ -505,16 +1111,20 @@ void setup() {
     Serial.println("IR command store initialization failed.");
   }
   irCommandStore.printStatus(Serial);
+  loadAcState();
 
   irsend.begin();
+  sharpAc.begin();
   irrecv.enableIRIn();
 
   setupHomeSpan();
+  setupApiServer();
   printHelp();
 }
 
 void loop() {
   homeSpan.poll();
+  handleApiServer();
   handleAutoSetupAp();
   handleConfigButton();
   updateLastDecoded();
