@@ -10,6 +10,7 @@
 #include <WebServer.h>
 #include <WiFi.h>
 #include <HomeSpan.h>
+#include <esp_system.h>
 #include <ir_Sharp.h>
 
 #include "config.h"
@@ -34,6 +35,9 @@ constexpr uint8_t kAcDisplayMaxTempC = 32;
 constexpr uint8_t kAcDisplayTempOffsetC = 2;
 constexpr uint16_t kAcSwingFrameGapMs = 80;
 constexpr uint16_t kApiServerPort = 8080;
+constexpr size_t kApiTokenBytes = 24;
+constexpr size_t kSetupApPasswordLength = 16;
+constexpr char kAuthorizationHeader[] = "Authorization";
 
 // A907 baseline captured at cool 25C, fan auto, fixed direction 2.
 constexpr uint8_t kSharpAcStateTemplate[kSharpAcStateLength] = {
@@ -72,11 +76,15 @@ IRrecv irrecv(IR_RECV_PIN, kCaptureBufferSize, kIrTimeoutMs, true);
 decode_results results;
 ir_store::IrCommandStore irCommandStore;
 Preferences acPreferences;
+Preferences credentialPreferences;
 WebServer apiServer(kApiServerPort);
 AcState acState;
 bool acPreferencesReady = false;
 bool apiServerStarted = false;
 bool lightPowerState = false;
+String apiBearerToken;
+String setupApPassword;
+String homeKitPairingCode;
 
 SpanCharacteristic *lightPowerCharacteristic = nullptr;
 SpanCharacteristic *acActiveCharacteristic = nullptr;
@@ -103,6 +111,80 @@ uint8_t stableCaptureCount = 0;
 bool buttonWasPressed = false;
 uint32_t buttonPressedAt = 0;
 bool buttonLongHandled = false;
+
+String randomString(const char *alphabet, size_t length) {
+  String value;
+  value.reserve(length);
+  const size_t alphabetLength = strlen(alphabet);
+  for (size_t i = 0; i < length; i++) {
+    value += alphabet[esp_random() % alphabetLength];
+  }
+  return value;
+}
+
+bool isAllowedHomeKitCode(const String &code) {
+  static const char *const disallowed[] = {
+      "00000000", "11111111", "22222222", "33333333",
+      "44444444", "55555555", "66666666", "77777777",
+      "88888888", "99999999", "12345678", "87654321",
+  };
+  for (const char *value : disallowed) {
+    if (code == value) {
+      return false;
+    }
+  }
+  return true;
+}
+
+String generateHomeKitCode() {
+  String code;
+  do {
+    code = randomString("0123456789", 8);
+  } while (!isAllowedHomeKitCode(code));
+  return code;
+}
+
+void loadDeviceCredentials() {
+  if (!credentialPreferences.begin("device-auth", false)) {
+    Serial.println("Failed to open device credential storage; using temporary credentials.");
+    apiBearerToken = randomString("0123456789abcdef", kApiTokenBytes * 2);
+    setupApPassword = randomString(
+        "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789",
+        kSetupApPasswordLength);
+    homeKitPairingCode = generateHomeKitCode();
+    return;
+  }
+
+  apiBearerToken = credentialPreferences.getString("apiToken", "");
+  if (apiBearerToken.length() != kApiTokenBytes * 2) {
+    apiBearerToken = randomString("0123456789abcdef", kApiTokenBytes * 2);
+    credentialPreferences.putString("apiToken", apiBearerToken);
+  }
+
+  setupApPassword = credentialPreferences.getString("apPassword", "");
+  if (setupApPassword.length() != kSetupApPasswordLength) {
+    setupApPassword = randomString(
+        "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789",
+        kSetupApPasswordLength);
+    credentialPreferences.putString("apPassword", setupApPassword);
+  }
+
+  homeKitPairingCode = credentialPreferences.getString("homeKitCode", "");
+  if (homeKitPairingCode.length() != 8 ||
+      !isAllowedHomeKitCode(homeKitPairingCode)) {
+    homeKitPairingCode = generateHomeKitCode();
+    credentialPreferences.putString("homeKitCode", homeKitPairingCode);
+  }
+}
+
+void printDeviceCredentials() {
+  Serial.println("Local device credentials (do not publish):");
+  Serial.printf("  Setup AP password: %s\n", setupApPassword.c_str());
+  Serial.printf("  HomeKit pairing code: %.3s-%.2s-%.3s\n",
+                homeKitPairingCode.c_str(), homeKitPairingCode.c_str() + 3,
+                homeKitPairingCode.c_str() + 5);
+  Serial.printf("  API bearer token: %s\n", apiBearerToken.c_str());
+}
 
 uint8_t clampAcTemperature(uint8_t temperature) {
   return constrain(temperature, kAcDisplayMinTempC, kAcDisplayMaxTempC);
@@ -260,15 +342,16 @@ void resetLearningCandidate() {
 
 void printHelp() {
   Serial.println("IR learning commands in HomeSpan CLI:");
-  Serial.println("  o - learn light_on");
-  Serial.println("  n - learn night_light");
-  Serial.println("  a - send current SHARP_AC state");
-  Serial.println("  q - show IR command status");
-  Serial.println("  p - show IR command details");
-  Serial.println("  O - send light_on 3 times");
-  Serial.println("  N - send night_light 3 times");
-  Serial.println("  k - cancel active learning");
-  Serial.println("  y - clear learned IR commands");
+  Serial.println("  @o - learn light_on");
+  Serial.println("  @n - learn night_light");
+  Serial.println("  @a - send current SHARP_AC state");
+  Serial.println("  @q - show IR command status");
+  Serial.println("  @p - show IR command details");
+  Serial.println("  @O - send light_on 3 times");
+  Serial.println("  @N - send night_light 3 times");
+  Serial.println("  @k - cancel active learning");
+  Serial.println("  @y - clear learned IR commands");
+  Serial.println("  @z - show local device credentials");
 }
 
 void startLearning(const char *commandId) {
@@ -929,6 +1012,8 @@ void populateApiStatus(JsonDocument &document) {
 void sendApiJson(int statusCode, JsonDocument &document) {
   String response;
   serializeJson(document, response);
+  apiServer.sendHeader("Cache-Control", "no-store");
+  apiServer.sendHeader("X-Content-Type-Options", "nosniff");
   apiServer.send(statusCode, "application/json; charset=utf-8", response);
 }
 
@@ -943,6 +1028,29 @@ void sendApiError(int statusCode, const char *error) {
   document["ok"] = false;
   document["error"] = error;
   sendApiJson(statusCode, document);
+}
+
+bool secureEquals(const String &left, const String &right) {
+  const size_t maximumLength = max(left.length(), right.length());
+  uint8_t difference = static_cast<uint8_t>(left.length() ^ right.length());
+  for (size_t index = 0; index < maximumLength; ++index) {
+    const char leftCharacter = index < left.length() ? left[index] : 0;
+    const char rightCharacter = index < right.length() ? right[index] : 0;
+    difference |= static_cast<uint8_t>(leftCharacter ^ rightCharacter);
+  }
+  return difference == 0;
+}
+
+bool requireApiAuthorization() {
+  const String expectedAuthorization = "Bearer " + apiBearerToken;
+  if (secureEquals(apiServer.header(kAuthorizationHeader),
+                   expectedAuthorization)) {
+    return true;
+  }
+
+  apiServer.sendHeader("WWW-Authenticate", "Bearer");
+  sendApiError(401, "unauthorized");
+  return false;
 }
 
 bool parseOptionalApiInteger(const char *name, int minimum, int maximum,
@@ -1017,22 +1125,44 @@ void handleApiLight(bool requestedOn) {
 }
 
 void setupApiServer() {
-  apiServer.enableCORS(true);
-  apiServer.on("/", HTTP_GET, []() { sendApiStatus(); });
-  apiServer.on("/api/status", HTTP_GET, []() { sendApiStatus(); });
-  apiServer.on("/api/ac", HTTP_GET, []() { sendApiStatus(); });
-  apiServer.on("/api/light", HTTP_GET, []() { sendApiStatus(); });
-  apiServer.on("/api/ac/off", HTTP_POST, handleApiAcOff);
+  static const char *collectedHeaders[] = {kAuthorizationHeader};
+  apiServer.collectHeaders(collectedHeaders, 1);
+  apiServer.on("/", HTTP_GET, []() {
+    if (requireApiAuthorization()) sendApiStatus();
+  });
+  apiServer.on("/api/status", HTTP_GET, []() {
+    if (requireApiAuthorization()) sendApiStatus();
+  });
+  apiServer.on("/api/ac", HTTP_GET, []() {
+    if (requireApiAuthorization()) sendApiStatus();
+  });
+  apiServer.on("/api/light", HTTP_GET, []() {
+    if (requireApiAuthorization()) sendApiStatus();
+  });
+  apiServer.on("/api/ac/off", HTTP_POST, []() {
+    if (requireApiAuthorization()) handleApiAcOff();
+  });
   apiServer.on("/api/ac/cool", HTTP_POST,
-               []() { handleApiAcOn(AcMode::Cool); });
+               []() {
+                 if (requireApiAuthorization()) handleApiAcOn(AcMode::Cool);
+               });
   apiServer.on("/api/ac/heat", HTTP_POST,
-               []() { handleApiAcOn(AcMode::Heat); });
+               []() {
+                 if (requireApiAuthorization()) handleApiAcOn(AcMode::Heat);
+               });
   apiServer.on("/api/light/on", HTTP_POST,
-               []() { handleApiLight(true); });
+               []() {
+                 if (requireApiAuthorization()) handleApiLight(true);
+               });
   apiServer.on("/api/light/off", HTTP_POST,
-               []() { handleApiLight(false); });
-  apiServer.onNotFound(
-      []() { sendApiError(404, "API endpoint not found"); });
+               []() {
+                 if (requireApiAuthorization()) handleApiLight(false);
+               });
+  apiServer.onNotFound([]() {
+    if (requireApiAuthorization()) {
+      sendApiError(404, "API endpoint not found");
+    }
+  });
 }
 
 void handleApiServer() {
@@ -1056,7 +1186,8 @@ void handleApiServer() {
 void setupHomeSpan() {
   homeSpan.setLogLevel(1);
   homeSpan.setApSSID(SETUP_AP_SSID);
-  homeSpan.setApPassword(SETUP_AP_PASSWORD);
+  homeSpan.setApPassword(setupApPassword.c_str());
+  homeSpan.setPairingCode(homeKitPairingCode.c_str());
   homeSpan.setApTimeout(300);
   homeSpan.enableAutoStartAP();
   homeSpan.begin(Category::Lighting, DEVICE_NAME);
@@ -1092,6 +1223,8 @@ void setupHomeSpan() {
                       commandCancelLearning);
   new SpanUserCommand('y', " - clear learned IR commands",
                       commandClearLearnedIr);
+  new SpanUserCommand('z', " - show local device credentials",
+                      [](const char *) { printDeviceCredentials(); });
 }
 
 }  // namespace
@@ -1103,6 +1236,7 @@ void setup() {
     digitalWrite(STATUS_LED_PIN, LOW);
   }
   pinMode(CONFIG_BUTTON_PIN, INPUT_PULLUP);
+  loadDeviceCredentials();
 
   if (!LittleFS.begin(true)) {
     Serial.println("LittleFS mount failed.");

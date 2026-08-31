@@ -19,4 +19,3 @@
 
 #define DEVICE_NAME "esp32-smart-remote"
 #define SETUP_AP_SSID "SmartRemote-Setup"
-#define SETUP_AP_PASSWORD "homespan"

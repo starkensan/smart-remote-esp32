@@ -80,11 +80,11 @@ pio device monitor --port /dev/ttyACM0
 初期AP:
 
 - SSID: `SmartRemote-Setup`
-- Password: `homespan`
+- Password: デバイスごとに初回起動時に生成
 
 6. Apple HomeアプリでHomeSpanのペアリングコードを使って追加します。
 
-ペアリングコードやQR情報はシリアルモニタに表示されます。必要に応じてHomeSpan CLIの `S` コマンドでセットアップコードを設定してください。
+設定APのパスワード、HomeKitペアリングコード、APIトークンはESP32のNVSにだけ保存されます。シリアルモニタからHomeSpan CLIの `@z` を入力すると確認できます。これらの値をログ、Issue、スクリーンショットへ掲載しないでください。
 
 ## HomeKit操作
 
@@ -104,7 +104,7 @@ HomeKit上では照明用のLightbulbサービスと、エアコン送信用のS
 
 ## HTTP API
 
-Wi-Fi接続後、ポート`8080`でHTTP APIを起動します。IPアドレスが`192.168.0.16`の場合のベースURLは `http://192.168.0.16:8080` です。
+Wi-Fi接続後、ポート`8080`でHTTP APIを起動します。ベースURLは `http://<DEVICE_IP>:8080` です。すべてのリクエストに、シリアルCLIの `@z` で確認したAPIトークンをBearer認証として付けます。
 
 | メソッド | パス | 動作 |
 | --- | --- | --- |
@@ -120,15 +120,15 @@ Wi-Fi接続後、ポート`8080`でHTTP APIを起動します。IPアドレス�
 冷房・暖房は、任意で`temperature=17..32`と`fan=0..4`をクエリ指定できます。`fan=0`は自動です。
 
 ```sh
-curl http://192.168.0.16:8080/api/status
-curl -X POST "http://192.168.0.16:8080/api/ac/cool?temperature=25&fan=0"
-curl -X POST "http://192.168.0.16:8080/api/ac/heat?temperature=24&fan=2"
-curl -X POST http://192.168.0.16:8080/api/ac/off
-curl -X POST http://192.168.0.16:8080/api/light/on
-curl -X POST http://192.168.0.16:8080/api/light/off
+curl -H "Authorization: Bearer <API_TOKEN>" http://<DEVICE_IP>:8080/api/status
+curl -X POST -H "Authorization: Bearer <API_TOKEN>" "http://<DEVICE_IP>:8080/api/ac/cool?temperature=25&fan=0"
+curl -X POST -H "Authorization: Bearer <API_TOKEN>" "http://<DEVICE_IP>:8080/api/ac/heat?temperature=24&fan=2"
+curl -X POST -H "Authorization: Bearer <API_TOKEN>" http://<DEVICE_IP>:8080/api/ac/off
+curl -X POST -H "Authorization: Bearer <API_TOKEN>" http://<DEVICE_IP>:8080/api/light/on
+curl -X POST -H "Authorization: Bearer <API_TOKEN>" http://<DEVICE_IP>:8080/api/light/off
 ```
 
-APIとHomeSpanは同じ状態を共有します。API操作後はHomeアプリの特性値も更新され、Homeアプリからの操作も`GET /api/status`へ反映されます。APIには認証がないため、信頼できるローカルネットワーク内だけで使用してください。
+APIとHomeSpanは同じ状態を共有します。API操作後はHomeアプリの特性値も更新され、Homeアプリからの操作も`GET /api/status`へ反映されます。APIはBearer認証必須ですがHTTP通信自体は暗号化されないため、信頼できるローカルネットワーク内だけで使用してください。ブラウザ向けのCORSは有効にしていません。
 
 ## HomeSpan CLI
 
@@ -136,12 +136,13 @@ APIとHomeSpanは同じ状態を共有します。API操作後はHomeアプリ�
 
 このプロジェクト固有のIR学習コマンド:
 
-- `o`: 「点灯」信号を学習
-- `n`: 「常夜灯」信号を学習
-- `a`: 現在保存されているSHARP_AC状態を送信
-- `q`: 学習済み信号の保存状態を表示
-- `k`: 学習中の操作をキャンセル
-- `y`: 学習済みIR信号を削除
+- `@o`: 「点灯」信号を学習
+- `@n`: 「常夜灯」信号を学習
+- `@a`: 現在保存されているSHARP_AC状態を送信
+- `@q`: 学習済み信号の保存状態を表示
+- `@k`: 学習中の操作をキャンセル
+- `@y`: 学習済みIR信号を削除
+- `@z`: 設定APパスワード、HomeKitペアリングコード、APIトークンを表示
 
 ## ボタン操作
 
