@@ -2,7 +2,9 @@
 
 Seeed Studio XIAO ESP32S3で作るスマートリモコンのPlatformIOプロジェクトです。赤外線LEDで家電に信号を送信し、赤外線受信モジュールでリモコン信号を学習できます。
 
-現在のv1要件は [docs/requirements.md](docs/requirements.md) にまとめています。
+このREADMEではセットアップ方法と使用方法を説明します。内部構成は
+[docs/architecture.md](docs/architecture.md)、v1要件は
+[docs/requirements.md](docs/requirements.md) を参照してください。
 
 ## 機能
 
@@ -98,7 +100,7 @@ HomeKit上では照明用のLightbulbサービスと、エアコン送信用のS
 
 未学習の状態でON/OFFすると、シリアルログに未学習であることを出力し、操作は失敗として扱います。
 
-エアコン信号は実機で確認した104-bit状態データを基に、SHARP_ACプロトコルとして動的に生成します。実リモコン表示温度はプロトコル解析値より2度高いため、送信時に補正します。風量は自動と1～4、風向は自動、固定1～5、全方向スイングに対応します。
+風量は自動と1～4、風向は自動、固定1～5、全方向スイングに対応します。
 
 室温センサーは搭載していないため、HomeKitの現在温度には選択中の設定温度を表示します。エアコン状態は最後に送信した値を表示する推定状態であり、実機からの状態フィードバックではありません。
 
@@ -128,7 +130,7 @@ curl -X POST -H "Authorization: Bearer <API_TOKEN>" http://<DEVICE_IP>:8080/api/
 curl -X POST -H "Authorization: Bearer <API_TOKEN>" http://<DEVICE_IP>:8080/api/light/off
 ```
 
-APIとHomeSpanは同じ状態を共有します。API操作後はHomeアプリの特性値も更新され、Homeアプリからの操作も`GET /api/status`へ反映されます。APIはBearer認証必須ですがHTTP通信自体は暗号化されないため、信頼できるローカルネットワーク内だけで使用してください。ブラウザ向けのCORSは有効にしていません。
+APIとHomeSpanは同じ状態を共有します。API操作後はHomeアプリの表示も更新され、Homeアプリからの操作も`GET /api/status`へ反映されます。APIはBearer認証必須ですがHTTP通信自体は暗号化されないため、信頼できるローカルネットワーク内だけで使用してください。ブラウザ向けのCORSは有効にしていません。
 
 ## HomeSpan CLI
 
@@ -155,7 +157,7 @@ D3長押しでは、Wi-Fi設定、学習済みIR信号、エアコン設定は�
 
 学習済みIR信号だけを消す場合:
 
-- HomeSpan CLIで `y` を入力する
+- HomeSpan CLIで `@y` を入力する
 
 HomeKitペアリング情報だけを消す場合:
 
